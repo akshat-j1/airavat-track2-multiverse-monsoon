@@ -1,5 +1,8 @@
 # Airavat experiments
 
+The submitted checkpoint was trained only on the organizer's supplied
+2005–2021 archive. All extended-archive experiments are outside the submission.
+
 ## Step 1 — Verify the baseline
 
 Added this log. Used the existing organizer scoring wrappers in
@@ -177,7 +180,7 @@ affinity=0x55 physical_cores=4
 `git check-attr filter -- weights/airavat.pt` returned
 `weights/airavat.pt: filter: unspecified`. No candidate weights were promoted.
 
-## Step 2 — Preflight the extended archive
+## Step 2 — Extended archive preflight (not part of submission)
 
 The supplied reference archive loaded successfully. The extended archive was
 absent from its requested path. The format, static-field equality, seam
@@ -382,7 +385,7 @@ On the same shipped weights, the earlier evaluator's calendar-neighbor
 climatology gave 37.63/45 and −2.01%. The kit climatology alone moved that
 replay to 37.15/45 and −2.58%. The archived train-only weights were unavailable.
 
-## Step 5 — E1 and E2 preflight
+## Step 5 — E1 and E2 preflight (not part of submission)
 
 The extended archive is absent from the workspace. The original organizer
 archive is available for benchmarking. E1 and E2 have no training or benchmark
@@ -418,7 +421,8 @@ under the shared extended training dataset and seed.
 
 ## Step 6 — Prepare the capacity and loss sweep
 
-The extended archive is still absent (`Test-Path -LiteralPath data/r1/india_climate_1979_2021.nc`
+The extension is not part of submission. Its archive is still absent
+(`Test-Path -LiteralPath data/r1/india_climate_1979_2021.nc`
 returned `False`). E1 and E2 have no result, so the winning data setup,
 trained width sweep, candidate ranking, and three-fold confirmation are
 pending. The shipped checkpoint remains unchanged.
@@ -584,8 +588,8 @@ previous E0 JSON.
 
 ## Step 7 — Ensemble inference and held-out shrinkage
 
-The extended archive remains unavailable and there is no winning
-configuration to train across seeds. E4 and E5 below are smoke bundles.
+The optional extension is not part of submission. Its archive was unavailable,
+so no extension configuration was selected. E4 and E5 below are smoke bundles.
 They share one recreated train-only network with controlled changes to the
 member rain biases. They are not independently trained candidates.
 
@@ -714,8 +718,8 @@ scores remained below E0. No checkpoint was promoted.
 ## Step 8 — Expanded causal audit
 
 Added a repeatable audit and ran it on E0 and the E4 and E5 smoke bundles.
-The extended archive is still absent, so there is no trained winner to
-audit. The same input draws were used for all three bundles. No model,
+The optional extension is not part of submission and had no trained candidate
+to audit. The same input draws were used for all three bundles. No model,
 transport, checkpoint, or server changes were needed for this audit.
 
 ```powershell
@@ -778,11 +782,11 @@ condition did not trigger.
 
 ## Step 9 — Submission preflight
 
-The extended training archive is absent and no candidate cleared the earlier
-forecast and causality gates. Full-archive retraining was not run. The
-existing checkpoint remains the submission file. Added the extended-archive
-build commands to the training README and appended the available held-out
-diagnostics to `train/validation.json`. The new validation section identifies
+The original organizer-archive checkpoint is the submission file. No
+replacement candidate cleared the forecast and causality gates. The optional
+extension was not run and is not part of submission. Its build commands are
+preserved in the training README. The held-out diagnostics in
+`train/validation.json` identify
 the smoke bundles and records their commands, seed, data span, and evaluation
 environment. It contains no E0 in-sample forecast numbers.
 
@@ -873,9 +877,9 @@ clean clone startup, repo scan, schema validator, and plain weight size PASS
 ```
 
 The clean checkout stayed clean after verification. These checks apply to
-the existing Git blob. The new extended-data submission remains pending.
+the submitted Git blob.
 
-### Local archive-build smoke test
+### Local archive-build smoke test (not part of submission)
 
 This exercises the documented merge and export using adjacent five-day
 samples from the organizer archive. It checks exact preservation of the
@@ -894,7 +898,7 @@ import xarray as xr
 from train.common import load_weather
 
 readme = Path("train/README.md").read_text(encoding="utf-8")
-section = readme.split("## Build the extended training archive", 1)[1].split("## Reproduce the shipped checkpoint", 1)[0]
+section = readme.split("## Not used for the submission", 1)[1].split("## Reproduce the shipped checkpoint", 1)[0]
 convert, export = re.findall(r"<<'PY'\n(.*?)\nPY\n", section, re.S)
 with TemporaryDirectory(prefix="airavat-archive-smoke-") as directory:
     work = Path(directory)

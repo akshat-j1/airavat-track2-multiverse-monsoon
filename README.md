@@ -136,8 +136,8 @@ Scratch test inputs, logs, and downloaded kit files belong in ignored
 ## Train and assess skill
 
 Follow the training, dataset inspection, and held-out evaluation instructions in
-[train/README.md](train/README.md), including the commands to build the extended
-archive and reproduce the shipped checkpoint. Keep the training archive outside Git.
+[train/README.md](train/README.md). Reproducing the shipped checkpoint requires the
+organizer's supplied 2005–2021 archive. Keep the training archive outside Git.
 
 ## Build the submission brief
 

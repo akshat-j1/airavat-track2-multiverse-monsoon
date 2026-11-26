@@ -85,12 +85,13 @@ rain peaks. The benchmark reports model-to-observed peak rain ratios for
 the cyclone and heavy-rain proxies. Larger leads use the array's own fitted
 row.
 
-## Build the extended training archive
+## Not used for the submission
 
-Run this in a training environment with the organizer kit installed. Keep
-the organizer's original NetCDF as the benchmark input. The extended
-archive adds the earlier WeatherBench2 rows and preserves the organizer
-fields and static grid.
+The shipped model was trained only on the organizer's supplied 2005–2021
+archive. The earlier WeatherBench2 rows and the commands below belong to an
+optional extension experiment, not part of submission. The supplied archive
+remains the benchmark input. Its upstream source attribution is recorded in
+`validation.json`.
 
 ```sh
 python -m pip install -r requirements-train.txt
@@ -132,9 +133,6 @@ np.testing.assert_array_equal(extended.physical[-len(source.dates):], source.phy
 print(output, extended.dates[0], extended.dates[-1], extended.physical.shape)
 PY
 ```
-
-The commands above describe the extended input. The submission checkpoint
-documented below is the existing organizer-archive fit.
 
 ## Reproduce the shipped checkpoint
 

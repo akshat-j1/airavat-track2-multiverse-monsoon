@@ -1,6 +1,7 @@
 {
   "official_data_release": "https://github.com/OfficialAbhinavSingh/yug-monsoon-kit/releases/tag/v1.0.0",
-  "data_attribution": "Contains modified Copernicus Climate Change Service information (ERA5, Hersbach et al. 2020), accessed through Google WeatherBench 2 (Rasp et al. 2024). ERA5 is licensed under CC BY 4.0.",
+  "data_attribution": "The organizer's supplied archive contains modified Copernicus Climate Change Service information (ERA5, Hersbach et al. 2020) sourced through the Google dataset described by Rasp et al. (2024). ERA5 is licensed under CC BY 4.0.",
+  "submission_data_scope": "The shipped checkpoint was trained only on the organizer's supplied 2005–2021 archive.",
   "held_out_checkpoint_fit": {
     "years": "2005–2019",
     "seed": 42,
@@ -300,8 +301,7 @@
     "checkpoint_decision": "Kept the existing binary because the retrained rain candidates lost event forecast skill."
   },
   "submission_experiments": {
-    "status": "blocked",
-    "required_archive": "data/r1/india_climate_1979_2021.nc",
+    "status": "Optional archive extension was blocked and is not part of submission. The recorded diagnostics use the supplied archive.",
     "winning_configuration": null,
     "full_archive_retraining": "not_run",
     "extended_data_comparison": {
