@@ -1,15 +1,24 @@
 # A CPU weather twin for monsoon scenarios
 
-Airavat predicts six physical weather fields on a 32 × 36 grid. Three daily input states initialize a residual U-Net that predicts deviations from a fitted seasonal cycle. Static terrain and a land mask are bundled with the model. The CPU Engine steps forward one day at a time and accepts an intervention on the last input state.
+Airavat forecasts daily weather by learning deviations from a fitted seasonal cycle. Prime is the reference. Branch applies a localized shock to the final input state and advances the learned response alongside wind-driven transport and pressure and momentum adjustments.
 
-## Drift and spatial detail
+![Forecast architecture and the separate perturbation path](../brief/architecture.png)
 
-Multi-step training exposes the network to its own forecasts. The rain head learns in log space with penalties for missed heavy rain and loss of spatial variance. Held-out mean RMSE was 25.7%, 28.1%, and 25.8% below persistence at days 1, 4, and 8 across 721 windows. Day-eight spatial variance ratios on the five event proxies ranged from 0.54 to 1.09.
+## Held-out skill against the stronger baseline
 
-## Counterfactual dynamics
+Skill compares the model's RMSE with the lower RMSE of persistence and climatology for each variable and lead. Positive values indicate lower error.
 
-Branch combines a learned response with wind-driven transport, lateral mixing, and a damped pressure and momentum adjustment. A spatial support limit applies to both response terms on day one. On ten archive diagnostic windows, the kit's propagation check passed for 9 Bay of Bengal shocks and 10 Arabian Sea shocks. All ten zero and subprecision shocks matched their unperturbed forecasts exactly.
+| Lead (days) | t2m | tp | u10 | v10 | msl | tcwv |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | +24.11% | +23.53% | +21.08% | +25.28% | +30.98% | +29.36% |
+| 4 | +17.56% | +2.46% | +13.86% | +9.95% | +13.36% | +16.57% |
+| 8 | +4.99% | -3.87% | +2.58% | +0.16% | +3.92% | +1.69% |
 
 ## Where the model can fail
 
-The five event proxies scored 28.69 out of 45 for forecast skill. Day-eight mean skill versus the stronger baseline was −2.0%. The model missed observed heavy-rain cells at days four and eight in the winter disturbance proxy. The hidden 2023–2024 cases are unverified. The deployment checkpoint uses the full public archive. Forecast skill is measured on a separate checkpoint fit only on the earlier years.
+Rolling the model forward can accumulate error and smooth local rain peaks. Day-8 precipitation RMSE is 3.9% worse than climatology on held-out windows, and the precipitation variance ratio falls to about 0.72. The winter disturbance proxy had zero heavy-rain hits at days 4 and 8.
+
+> **What the numbers cover**
+> **Held out.** The table uses 721 windows from 2020-2021 and a train-only checkpoint fitted on 2005-2019 using the shipped training recipe.
+> **In sample.** The shipped checkpoint was fitted on 2005-2021. It has no clean out-of-sample skill score. The dashboard demo uses synthetic inputs.
+> **Hidden organizer cases.** Unverified.

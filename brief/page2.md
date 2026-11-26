@@ -1,15 +1,18 @@
-# Live counterfactuals and land exposure
+# From a rain response to a decision
 
-## Follow a shock through the forecast
+Run both timelines with the **Heat dome** preset. Branch adds a localized +4 K temperature shock to the synthetic input. The warm anomaly is carried by the response transport, and the learned coupling produces a local rain response. This illustrates how the model responds to warming in the scenario.
 
-Start from a synthetic three-day window, upload three observations, or spin up the synthetic seed for 14 days and reuse its final three outputs. Choose a preset or place a custom shock. Prime and Branch use the same inputs, season, and forecast horizon. Branch adds the shock to the final input day. All forecast maps and impact values come from live CPU rollouts.
+![Day-4 Branch-minus-Prime precipitation for the Heat dome preset](rain-difference.png)
 
-![Day-four precipitation for a 2 K warming in the Bay of Bengal](dashboard.png)
+*Day 4. The largest absolute difference was 0.706 mm/day. The 37-cell footprint is the smallest set containing 90% of the squared rain response.*
 
-*The Bay of Bengal demo uses synthetic inputs. On day 4, the peak rain difference was 0.17 mm/day and the response footprint was 141 cells. The footprint is the smallest set of cells containing 90% of the squared rainfall response.*
+## Where to schedule a drain inspection
 
-## Use case and limits
+Use the Heavy-rain days layer to decide which grid cells to review for a pre-event drain inspection. Flag land cells reaching **64.5 mm or more in 24 hours**, the lower bound of the India Meteorological Department's heavy rainfall category.
 
-For a rainfall preparedness discussion, compare cumulative rain, heavy-rain days, and the rain deficit index across 736 land cells. The index uses a user-selected daily need. Heat days use the daily mean temperature. Thresholds can be adjusted against the same forecasts.
+> **Example from the live demo**
+> Of 736 land cells, 5 reached the threshold in each timeline. Threshold crossings occurred on days 3, 4 and 5 in both Prime and Branch.
 
-The sensitivity ensemble combines Prime with eight live forecasts using small localized temperature or wind perturbations. Shaded ranges span the nine member land means. The selected day's exceedance probabilities average the fraction of members crossing each threshold across land cells. These frequencies describe the tested scenarios. The ensemble has no probability calibration or observed impact validation.
+The outputs describe synthetic scenarios. Ensemble exceedance frequencies are uncalibrated, and the rain layer has no validation against observed impacts.
+
+[India Meteorological Department, SOP for Weather Forecasting and Warning, table 1.5](https://mausam.imd.gov.in/imd_latest/contents/pdf/forecasting_sop.pdf)
