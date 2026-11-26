@@ -171,9 +171,10 @@ PYTORCH_ENABLE_MPS_FALLBACK=1 "$PYTHON_BIN" -m train.train "$DATANC" \
 For held-out evaluation, use `--split train` in both stages and
 `--val-years 2` in stage 2. Pass the event archive's externally chosen first
 verification days as `--event LABEL=DATE` and `--shock-target DATE` arguments
-to `python -m tests.eval_skill`. The case dates and metrics in
-`validation.json` record the audit replay. The deployment checkpoint's shock
-probes use archive observations included in its training period.
+to `python -m tests.eval_skill`. The dated cases and per-event results are in
+[`tests/fixtures/proxy_events.json`](../tests/fixtures/proxy_events.json), and
+`validation.json` retains the aggregate metrics. The deployment checkpoint's
+shock probes use archive observations included in its training period.
 
 The experimental `--event-rain-weight` loss adds intensity, local peak and
 rainfall gradient terms. The tested settings increased some storm peaks and

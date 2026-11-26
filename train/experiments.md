@@ -34,15 +34,16 @@ path = Path("weights/airavat.pt")
 audit = json.loads(Path("train/validation.json").read_text(encoding="utf-8"))
 release = audit["release_candidate_audit"]
 events = release["event_forecast"]
+fixture = json.loads(Path("tests/fixtures/proxy_events.json").read_text(encoding="utf-8"))
 weather = load_weather(Path("tests/_windows/india_climate_train.nc"))
 cut = validation_start(weather.dates, 2)
-cases = list(dict.fromkeys(f'{e["event"]}={e["first_target"]}' for e in events["events"]))
+cases = list(dict.fromkeys(f'{e["event"]}={e["first_target"]}' for e in fixture["event_forecast"]["events"]))
 for name, weights in (("shipped", path.parent), ("recreated_train_only", Path("tests/_windows/calibration/reference-final"))):
     checkpoint = weights / "airavat.pt"
     metadata = torch.load(checkpoint, map_location="cpu", weights_only=True)
     engine = Engine(weights)
     score = evaluate_events(engine, weather, cut, cases)
-    shocks = evaluate_shocks(engine, weather, Path("assets/stats.json"), 0, cut, release["shock_first_target_dates"])
+    shocks = evaluate_shocks(engine, weather, Path("assets/stats.json"), 0, cut, fixture["shock_first_target_dates"])
     checks = [shock for case in shocks for shock in case["shocks"].values()]
     winter = [case["heavy_cells_model"] for case in score["events"] if case["event"] == "winter_disturbance"]
     print(json.dumps({"checkpoint": name, "sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
@@ -350,7 +351,7 @@ smoke diagnostics. The shipped checkpoint retained SHA-256
 ## Step 4 — E0 benchmark reference
 
 `tests/benchmark.py` rebuilds windows from the five first-target selections
-and ten shock targets recorded in `train/validation.json`. The earlier
+and ten shock targets recorded in `tests/fixtures/proxy_events.json`. The earlier
 evaluator resolved those selections to windows. The repository records the
 selected targets and does not contain a separate event-search algorithm.
 The benchmark verifies the organizer archive by SHA-256, derives the held-out
@@ -487,8 +488,8 @@ print("Paired-state preservation and rain loss gradients PASS", float(csi.detach
 with xr.open_dataset(root / "india_climate_train.nc") as archive:
     dates = archive.time.values.astype("datetime64[D]")
 cut = validation_start(dates, 2)
-audit = json.loads(Path("train/validation.json").read_text(encoding="utf8"))["release_candidate_audit"]
-starts = [date for _, date in recorded_proxy_cases(audit)]
+fixture = json.loads(Path("tests/fixtures/proxy_events.json").read_text(encoding="utf-8"))
+starts = [date for _, date in recorded_proxy_cases(fixture)]
 for horizon in (8, 10):
     windows = window_ends(len(dates), horizon, "validation", val_start=cut)
     kept = exclude_proxy_windows(dates, windows, horizon, starts)

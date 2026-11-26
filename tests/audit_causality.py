@@ -16,7 +16,10 @@ from engine.engine import ENCODED_BOUNDS, Engine
 from model.unet import RAIN
 from tests.benchmark import ARCHIVE_SHA256, HOLDOUT_YEARS, SCRATCH, sha256
 from tests.eval_skill import evaluate_shocks, probe_ends
-from train.common import day_phase, exclude_proxy_windows, load_weather, recorded_proxy_cases, validation_start, window_ends
+from train.common import (
+    day_phase, exclude_proxy_windows, load_proxy_events, load_weather, recorded_proxy_cases, validation_start,
+    window_ends,
+)
 
 
 CHECKS = ("nonzero", "localized", "propagates", "stable", "no_teleport")
@@ -136,13 +139,13 @@ def main():
         parser.error("Use the original organizer archive")
     weather = load_weather(args.dataset)
     cut = validation_start(weather.dates, HOLDOUT_YEARS)
-    audit = json.loads((ROOT / "train/validation.json").read_text(encoding="utf-8"))["release_candidate_audit"]
-    events = recorded_proxy_cases(audit)
+    fixture = load_proxy_events()
+    events = recorded_proxy_cases(fixture)
     proxy_dates = [date for _, date in events]
     proxy_ends = probe_ends(weather, proxy_dates, cut, contract.MAX_STEPS)
     proxies = {end: name for end, (name, _) in zip(proxy_ends, events)}
     rng = np.random.default_rng(SEED)
-    shock_dates = audit["shock_first_target_dates"]
+    shock_dates = fixture["shock_first_target_dates"]
     random_ends = choose_random_ends(weather, cut, [*proxy_dates, *shock_dates], rng)
     stats_path = ROOT / "assets/stats.json"
     std = np.asarray(json.loads(stats_path.read_text(encoding="utf-8"))["std"], dtype=np.float32)

@@ -19,7 +19,7 @@ from monsoon_r1 import contract, scoring, stats
 
 from engine.engine import Engine, checkpoint_paths
 from tests.eval_skill import evaluate_events, evaluate_shocks, probe_ends
-from train.common import LEADS, day_phase, load_weather, recorded_proxy_cases, validation_start
+from train.common import LEADS, day_phase, load_proxy_events, load_weather, recorded_proxy_cases, validation_start
 
 
 ARCHIVE_SHA256 = "f37bdbd0bd44e6fe951adf36c9a08620075f9d17de391b04c97d61f06797903b"
@@ -54,10 +54,10 @@ def paired_rain_peaks(events):
 def benchmark(dataset, weights, label):
     if sha256(dataset) != ARCHIVE_SHA256:
         raise ValueError("Use the original organizer archive for a comparable benchmark")
-    audit = json.loads((ROOT / "train" / "validation.json").read_text(encoding="utf-8"))["release_candidate_audit"]
+    fixture = load_proxy_events()
     # The prior audit records first-target selections. Keep those same five cases.
-    cases = [f"{event}={date}" for event, date in recorded_proxy_cases(audit)]
-    shock_dates = audit["shock_first_target_dates"]
+    cases = [f"{event}={date}" for event, date in recorded_proxy_cases(fixture)]
+    shock_dates = fixture["shock_first_target_dates"]
     if len(cases) != 5 or len(set(shock_dates)) != 10 or len(shock_dates) != 10:
         raise ValueError("The archived protocol must contain five proxies and ten distinct shock targets")
 
