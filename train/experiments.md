@@ -918,3 +918,87 @@ with TemporaryDirectory(prefix="airavat-archive-smoke-") as directory:
 merged (10, 6, 32, 36) 2005-01-01 2005-01-10
 Local archive merge/export round trip PASS (10 days)
 ```
+
+## Brief v2 live preset measurement
+
+The preset comparison used the shipped `airavat-anomaly-unet` over the
+local HTTP API. All requests shared the dashboard's three synthetic input
+frames, day of year 196, a 10-day horizon, and a raised-cosine radius of
+4.5 grid cells. It used the dashboard's original preset values and land
+mask. No archive observations entered the preset comparison.
+
+| Existing preset | Day-4 peak absolute rain difference (mm/day) | Day-4 response footprint (cells) |
+| --- | ---: | ---: |
+| Warm Bay of Bengal | 0.1652 | 141 |
+| Weaker Arabian Sea wind | 0.1431 | 87 |
+| Stalled monsoon | 0.1453 | 121 |
+| Heat dome (+4 K) | 0.7060 | 37 |
+
+The footprint is the smallest count enclosing 90% of the sum of squared
+Branch-minus-Prime rain differences. Heat dome gave the largest absolute
+day-4 response and concentrated it into a local patch. The warm
+perturbation is transported by the response model, and the learned
+correction couples temperature and rain. The brief uses this existing
+preset with its original configuration. Its map shows the day-4 rain
+difference on a symmetric scale from -0.706 to +0.706 mm/day.
+
+At the dashboard threshold of 64.5 mm/day, 5 of 736 land cells reached
+the threshold at least once in Prime, and 5 did so in Branch. The
+days with at least one flagged land cell were 3, 4 and 5 in each
+timeline. Branch added zero land-cell crossings on any day. The cutoff
+is the lower bound of IMD's heavy rainfall category over 24 hours
+([IMD forecasting and warning SOP, table 1.5](https://mausam.imd.gov.in/imd_latest/contents/pdf/forecasting_sop.pdf)).
+
+Run these commands from the repository root, with the runtime environment
+activated for the first command. Use a second terminal for Node.
+
+```sh
+OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 python serve.py --host 127.0.0.1 --port 18427
+```
+
+```sh
+R=tests/_windows/brief-v2
+mkdir -p "$R"
+cat > "$R/measure.cjs" <<'JS'
+const fs = require('node:fs');
+const vm = require('node:vm');
+const [url, output] = process.argv.slice(2);
+const context = vm.createContext({
+  window: {}, location: new URL('/dashboard/', url), fetch, AbortController, setTimeout, clearTimeout,
+});
+for (const file of ['config.js', 'core.js', 'impact.js']) {
+  vm.runInContext(fs.readFileSync('dashboard/' + file, 'utf8'), context);
+}
+const M = context.window.Monsoon;
+const day = 196, steps = 10, radius = 4.5, lead = 4, threshold = M.impactDefaults.heavyRainMm;
+
+(async () => {
+  const grid = M.normalizeGrid(await (await fetch(new URL('/dashboard/grid.json', url))).json());
+  const health = await M.api('/health');
+  if (health.model_name !== 'airavat-anomaly-unet') throw Error(JSON.stringify(health));
+  const payload = {init_states: M.demoWindow(grid), doy_sincos: M.seasonal(day), steps};
+  const prime = (await M.api('/simulate', payload)).rollout;
+  const tests = {};
+  for (const [key, preset] of Object.entries(M.config.presets)) {
+    const centre = M.nearest(grid, preset.lat, preset.lon);
+    const perturbation = M.shockField(centre, radius, preset.channel, preset.magnitude, preset.secondary);
+    const branch = (await M.api('/simulate', {...payload, perturbation})).rollout;
+    const diff = M.difference(branch, prime);
+    const impacts = M.compareLandImpacts(prime, branch, grid.mask);
+    const novelHeavy = branch.map((t, d) => t[1].flat().filter((value, j) =>
+      grid.mask.flat()[j] >= .5 && value >= threshold && prime[d][1].flat()[j] < threshold).length);
+    const landFlags = label => impacts[label].fields.heavyRainDays.flat().filter(x => x > 0).length;
+    const daysAt = rollout => rollout.flatMap((t, d) => t[1].flat().some(
+      (value, j) => grid.mask.flat()[j] >= .5 && value >= threshold) ? [d + 1] : []);
+    const result = {preset, centre: [grid.lat[centre.r][centre.c], grid.lon[centre.r][centre.c]],
+      ...M.responseMetrics(diff, 1)[lead - 1], landCells: impacts.prime.landCells,
+      primeHeavyLandCells: landFlags('prime'), branchHeavyLandCells: landFlags('branch'),
+      primeDaysAtThreshold: daysAt(prime), branchDaysAtThreshold: daysAt(branch), addedHeavyByDay: novelHeavy};
+    tests[key] = {...result, delta: diff[lead - 1][1]};
+    console.log(key, JSON.stringify(result));
+  }
+  fs.writeFileSync(output, JSON.stringify({health, day, steps, radius, lead, threshold, tests}, null, 2) + '\n');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+JS
+node "$R/measure.cjs" http://127.0.0.1:18427 "$R/live-measurements.json"
+```
