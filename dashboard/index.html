@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101820">
+  <title>Monsoon / Branch Lab</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="config.js"></script>
+  <script defer src="core.js"></script>
+  <script defer src="impact.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="./"><span class="brand-mark" aria-hidden="true">≋</span> MONSOON <span class="brand-sub">/ BRANCH LAB</span></a>
+    <span id="health" class="badge" role="status">Connecting to model…</span>
+  </header>
+  <main>
+    <section class="intro">
+      <div><p class="eyebrow">A SMALL CHANGE. A DIFFERENT MONSOON.</p><h1>Explore the weather that could be.</h1><p class="muted">Keep one timeline. Change another. Follow the ripple across the Indian monsoon.</p></div>
+      <div class="resolution"><strong>32 × 36</strong><span>cells · 6 variables · daily steps</span></div>
+    </section>
+    <div class="workspace">
+      <aside class="controls" aria-label="Experiment setup">
+        <section class="control-section">
+          <h2><span>01</span> Initial conditions</h2>
+          <div class="button-row"><button id="demo" type="button">Generate demo</button><label class="button upload">Upload JSON<input id="upload" type="file" accept=".json,application/json"></label></div>
+          <p id="window-info" class="note">Synthetic demo · 3 input days</p>
+          <div class="field-row"><label>Day of year<input id="doy" type="number" min="1" max="366" step="1" value="196"></label><label>Forecast days<input id="steps" type="number" min="1" max="30" step="1" value="10"></label></div>
+        </section>
+        <section class="control-section">
+          <h2><span>02</span> Create a branch</h2>
+          <label>Shock preset<select id="preset"><option value="bay">Warm Bay of Bengal</option><option value="arabian">Weaker Arabian Sea wind</option><option value="stalled">Stalled monsoon</option><option value="heat">Heat dome</option><option value="custom">Custom shock</option></select></label>
+          <p id="preset-info" class="note">t2m +2 K · raised-cosine bump</p>
+          <label>Shock channel<select id="shock-channel"></select></label>
+          <div class="field-row"><label>Magnitude <span id="magnitude-unit">K</span><input id="magnitude" type="number" step="0.5" value="2"></label><label>Radius <span>cells</span><input id="radius" type="number" min="1" max="12" step="0.5" value="4.5"></label></div>
+          <div class="location"><span class="location-dot"></span><span id="centre-label">16.0°N, 88.0°E</span></div>
+          <p class="note">Click any map to move the shock centre.</p>
+          <button id="run" class="primary" type="button">Run both timelines <span aria-hidden="true">↗</span></button>
+          <button id="sanity" class="quiet" type="button">Check zero-shock equality</button>
+          <p id="sanity-result" class="note" role="status">Compare an explicit zero array with the base.</p>
+        </section>
+        <section class="control-section compact"><button id="export" class="quiet" type="button" disabled>↓ Export last request</button><p class="note">JSON payload, ready for /simulate.</p></section>
+      </aside>
+      <section class="results" aria-label="Forecast comparison">
+        <div class="result-toolbar"><div class="live-label"><span class="teal-dot"></span><span id="result-mode">INITIAL STATE · PREVIEW</span></div><label class="inline-field">View<select id="view-channel"></select></label></div>
+        <div id="status" class="status" role="status" aria-live="polite">Ready to experiment. Run both timelines to see a forecast.</div>
+        <div class="maps">
+          <article class="map-card"><div class="map-title"><h2>Timeline Prime</h2><span>UNCHANGED</span></div><div class="map-wrap"><canvas id="prime" aria-label="Timeline Prime map. Click to position the shock." tabindex="0"></canvas><span class="north">N ↑</span></div><div class="legend" id="prime-legend"></div></article>
+          <article class="map-card"><div class="map-title"><h2>Branch</h2><span class="amber">PERTURBED</span></div><div class="map-wrap"><canvas id="branch" aria-label="Branch map. Click to position the shock." tabindex="0"></canvas><span class="north">N ↑</span></div><div class="legend" id="branch-legend"></div></article>
+          <article class="map-card"><div class="map-title"><h2>Difference</h2><span class="purple">BRANCH − PRIME</span></div><div class="map-wrap"><canvas id="difference" aria-label="Difference map. Click to position the shock." tabindex="0"></canvas><span class="north">N ↑</span></div><div class="legend" id="difference-legend"></div></article>
+        </div>
+        <div class="map-notes"><span id="grid-info">Loading grid…</span><span id="hover" aria-live="off">Hover a cell to inspect all three timelines.</span></div>
+        <div class="timeline"><button id="play" type="button" aria-label="Play forecast" disabled>▶</button><div class="slider-area"><div class="slider-label"><strong id="day-label">Input day</strong><span id="timing">No forecast yet</span></div><input id="day" type="range" min="0" max="9" value="0" disabled aria-label="Forecast day"></div><span id="day-total">/ 10 days</span></div>
+        <div class="chart-heading"><div><p class="eyebrow">THE RIPPLE EFFECT</p><h2>How far does a change travel?</h2></div><span id="chart-channel" class="note">Temperature response</span></div>
+        <div class="charts"><article class="chart-card"><div class="chart-title"><h3>Response footprint</h3><span id="footprint-stat">—</span></div><p>Smallest cell count containing 90% of response energy</p><canvas id="footprint-chart" aria-label="Response footprint by forecast day"></canvas></article><article class="chart-card"><div class="chart-title"><h3>Peak response</h3><span id="peak-stat">—</span></div><p>Maximum absolute difference in the selected variable</p><canvas id="peak-chart" aria-label="Peak response by forecast day"></canvas></article></div>
+        <p class="method-note">Shocks are added to the branch only. Maps share a Prime/Branch scale across all days; the difference scale is symmetric about zero. Synthetic inputs are for exploration, not operational forecasting.</p>
+        <section class="impact-panel" aria-labelledby="impact-heading">
+          <div class="chart-heading"><div><p class="eyebrow">INDICATIVE LAND EXPOSURE</p><h2 id="impact-heading">What changes on land?</h2></div><span class="badge warning">Not an agronomic forecast</span></div>
+          <p class="note">Indicative scenario metrics from returned rollout values only. These are not crop, yield, irrigation or agronomic forecasts. Cards show an unweighted mean per land cell over the full forecast horizon; the day slider does not change this horizon.</p>
+          <div class="impact-controls">
+            <label>Heat threshold (°C)<input id="impact-heat" type="number" value="40" min="-100" max="100" step="0.5"></label>
+            <label>Scenario rain need (mm/day)<input id="impact-need" type="number" value="4" min="0.01" step="0.5"></label>
+            <label>Heavy-rain threshold (mm/day)<input id="impact-heavy" type="number" value="64.5" min="0.01" step="0.5"></label>
+            <label>Rollout tp units<select id="impact-rain-unit"><option value="mm">mm per daily step</option><option value="m">m per daily step (×1000)</option></select></label>
+          </div>
+          <p id="impact-status" class="status" role="status">Run both timelines to calculate indicative impacts.</p>
+          <div id="impact-content" hidden>
+            <div class="impact-cards">
+              <article class="impact-card"><h3>Indicative heat days</h3><p id="impact-heat-rule">t2m &gt; 40 °C</p><dl><div><dt>Prime</dt><dd id="impact-heatDays-prime">—</dd></div><div><dt>Branch</dt><dd id="impact-heatDays-branch">—</dd></div><div><dt>Δ days</dt><dd id="impact-heatDays-delta">—</dd></div></dl></article>
+              <article class="impact-card"><h3>Indicative cumulative rain</h3><p>Sum of daily tp · mm</p><dl><div><dt>Prime</dt><dd id="impact-cumulativeRain-prime">—</dd></div><div><dt>Branch</dt><dd id="impact-cumulativeRain-branch">—</dd></div><div><dt>Δ mm</dt><dd id="impact-cumulativeRain-delta">—</dd></div></dl></article>
+              <article class="impact-card"><h3>Indicative rain-deficit index</h3><p>1 − cumRain / (need × steps)</p><dl><div><dt>Prime</dt><dd id="impact-rainDeficit-prime">—</dd></div><div><dt>Branch</dt><dd id="impact-rainDeficit-branch">—</dd></div><div><dt>Δ index</dt><dd id="impact-rainDeficit-delta">—</dd></div></dl></article>
+              <article class="impact-card"><h3>Indicative heavy-rain days</h3><p id="impact-heavy-rule">tp ≥ 64.5 mm/day</p><dl><div><dt>Prime</dt><dd id="impact-heavyRainDays-prime">—</dd></div><div><dt>Branch</dt><dd id="impact-heavyRainDays-branch">—</dd></div><div><dt>Δ days</dt><dd id="impact-heavyRainDays-delta">—</dd></div></dl></article>
+            </div>
+            <div class="impact-layer-controls"><label>Indicative layer<select id="impact-layer"><option value="heatDays">Heat days</option><option value="cumulativeRain">Cumulative rain</option><option value="rainDeficit">Rain-deficit index</option><option value="heavyRainDays">Heavy-rain days</option></select></label><label>Timeline<select id="impact-timeline"><option value="branch">Branch</option><option value="prime">Prime</option></select></label></div>
+            <div class="impact-maps"><article class="map-card"><div class="map-title"><h3 id="impact-map-title">Indicative Branch · Heat days</h3><span>LAND ONLY</span></div><div class="map-wrap"><canvas id="impact-map" aria-label="Indicative land impact map"></canvas><span class="north">N ↑</span></div><div id="impact-map-legend" class="legend"></div></article><article class="map-card"><div class="map-title"><h3 id="impact-delta-title">Indicative delta · Heat days</h3><span class="purple">BRANCH − PRIME</span></div><div class="map-wrap"><canvas id="impact-delta-map" aria-label="Indicative land impact delta map"></canvas><span class="north">N ↑</span></div><div id="impact-delta-legend" class="legend"></div></article></div>
+            <p id="impact-hover" class="note impact-hover">Hover a land cell to inspect Prime, Branch and delta.</p>
+            <p class="method-note">Land mask ≥ 0.5 selects land cells. Heat uses t2m in Kelvin converted to °C. Rain is interpreted using the selected tp units. A negative deficit index means surplus relative to the scenario need; it is not clipped. Prime and Branch maps share a scale; delta is Branch − Prime.</p>
+            <div class="impact-policy"><h3>Indicative policy discussion cues</h3><ul id="impact-policy"></ul><p class="note">Templated scenario comparisons only. Not an agronomic forecast or a substitute for local observations and expert assessment.</p></div>
+          </div>
+        </section>
+      </section>
+    </div>
+    <footer><span>MONSOON / COUNTERFACTUAL WEATHER EXPLORER</span><span id="api-label"></span></footer>
+  </main>
+</body>
+</html>
