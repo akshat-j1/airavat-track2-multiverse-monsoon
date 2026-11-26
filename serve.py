@@ -17,6 +17,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "4")
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/mpl")
 
 import argparse  # noqa: E402
+import asyncio  # noqa: E402
 import base64  # noqa: E402
 import binascii  # noqa: E402
 import json  # noqa: E402
@@ -38,6 +39,7 @@ ROOT = Path(__file__).resolve().parent
 N_IN, N_CH, H, W = 3, 6, 32, 36
 MAX_STEPS = 14  # official monsoon_r1.contract.MAX_STEPS; no kit needed at runtime
 MAX_BODY_BYTES = 8 * 1024 * 1024
+REJECTED_BODY_DRAIN_TIMEOUT_SECONDS = 0.25
 PHASE_TOLERANCE = 1e-6
 INPUT_BOUNDS = (
     ("t2m", 150, 350), ("tp", 0, 1000), ("u10", -100, 100),
@@ -187,9 +189,30 @@ def parse_request(body):
     return init.astype(np.float32, copy=False), phase, steps, pert
 
 
+async def _discard_rejected_body(request, remaining):
+    """Consume an already-sent upload without storing it or waiting indefinitely."""
+    while remaining > 0:
+        message = await request.receive()
+        size = len(message.get("body", b""))
+        if size > remaining or message["type"] == "http.disconnect" or not message.get("more_body", False):
+            return
+        remaining -= size
+
+
 async def _read_json(request):
     media_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
     if media_type != "application/json" and not (media_type.startswith("application/") and media_type.endswith("+json")):
+        # ASGI delivers whole chunks. Only drain when HTTP framing guarantees a bounded body.
+        length = request.headers.get("content-length", "").lstrip("0")
+        sized = length.isascii() and length.isdecimal() and len(length) <= len(str(MAX_BODY_BYTES))
+        budget = int(length) if sized else 0
+        if (0 < budget <= MAX_BODY_BYTES and "transfer-encoding" not in request.headers
+                and request.headers.get("expect", "").strip().lower() != "100-continue"):
+            try:
+                await asyncio.wait_for(_discard_rejected_body(request, budget),
+                                       timeout=REJECTED_BODY_DRAIN_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                pass
         raise HTTPException(status_code=415, detail="Content-Type must be application/json")
     content_length = request.headers.get("content-length", "")
     if content_length.isdecimal() and int(content_length) > MAX_BODY_BYTES:
