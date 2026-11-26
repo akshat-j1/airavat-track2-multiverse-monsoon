@@ -1,1 +1,1 @@
-/weights/** filter=lfs diff=lfs merge=lfs -text
+# Checkpoints are stored directly in Git for offline evaluation.
