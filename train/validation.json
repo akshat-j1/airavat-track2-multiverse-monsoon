@@ -161,5 +161,24 @@
     "stable_and_valid": 32,
     "zero_shock_equal": 16,
     "windows": 16
+  },
+  "final_checkpoint": {
+    "fit_years": "2005–2021",
+    "training_days": 6209,
+    "epochs": 11,
+    "sha256": "53ea2d448627f44bf220f147c863e0078514955aa22441d03796d2d2802e8eb3",
+    "schema_validator": "All checks passed using the official starter's HTTP endpoints with the real Engine",
+    "in_sample_counterfactual_diagnostics": {
+      "windows": 24,
+      "local_cases": 48,
+      "localized_day1": 48,
+      "stable_and_valid": 48,
+      "propagated": {
+        "warm_ocean": 22,
+        "monsoon_stall": 12
+      },
+      "zero_shock_equal": 24,
+      "max_unperturbed_cpu_seconds_mac_m4": 0.024
+    }
   }
 }
