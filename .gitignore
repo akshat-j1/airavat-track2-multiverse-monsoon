@@ -1,0 +1,5 @@
+__pycache__/
+.venv/
+*.nc
+*.nc4
+*.netcdf
