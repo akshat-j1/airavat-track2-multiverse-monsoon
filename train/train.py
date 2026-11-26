@@ -2,6 +2,7 @@
 
 import argparse
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 import time
 
 import numpy as np
@@ -16,7 +17,7 @@ from train.common import (
     seasonal_fields, window_ends,
 )
 
-DEFAULT_CURRICULUM = "1,1,1,2,2,3,3,4,4,5,6,8"
+DEFAULT_CURRICULUM = "1,1,1,2,2,3,4,4,6,8,8"
 
 
 def synthetic_anomalies(batch_size, height, width, device):
@@ -28,38 +29,47 @@ def synthetic_anomalies(batch_size, height, width, device):
     radius = 1.0 + torch.rand((batch_size, 1, 1), device=device) * 2.5
     envelope = torch.exp(-((rows - center_y).square() + (cols - center_x).square()) / (2 * radius.square()))
     magnitude = torch.randn((batch_size, 6, 1, 1), device=device).clamp(-2, 2) * 0.65
-    active = (torch.rand((batch_size, 1, 1, 1), device=device) < 0.30)
-    return envelope[:, None] * magnitude * active
+    return envelope[:, None] * magnitude
 
 
 def transport_anomaly(delta, wind):
     """Diffuse and advect a training perturbation using the local wind."""
-    edge = F.pad(delta, (1, 1, 1, 1), mode="replicate")
-    middle = edge[..., 1:-1, 1:-1]
-    west, east = edge[..., 1:-1, :-2], edge[..., 1:-1, 2:]
-    south, north = edge[..., :-2, 1:-1], edge[..., 2:, 1:-1]
-    u, v = (wind / 20).clamp(-0.24, 0.24).unbind(dim=1)
-    zonal = u.clamp_min(0)[:, None] * (west - middle) + (-u).clamp_min(0)[:, None] * (east - middle)
-    meridional = v.clamp_min(0)[:, None] * (south - middle) + (-v).clamp_min(0)[:, None] * (north - middle)
-    return 0.94 * (middle + zonal + meridional + 0.1 * (west + east + south + north - 4 * middle))
+    u, v = (wind[:, :, None] * 0.22).clamp(-0.26, 0.26).unbind(dim=1)
+    for _ in range(4):
+        edge = F.pad(delta, (1, 1, 1, 1), mode="replicate")
+        west, east = edge[..., 1:-1, :-2], edge[..., 1:-1, 2:]
+        south, north = edge[..., :-2, 1:-1], edge[..., 2:, 1:-1]
+        zonal = u.clamp_min(0) * (west - delta) + (-u).clamp_min(0) * (east - delta)
+        meridional = v.clamp_min(0) * (south - delta) + (-v).clamp_min(0) * (north - delta)
+        diffusion = 0.09 * (west + east + south + north - 4 * delta)
+        delta = 0.987 * (delta + zonal + meridional + diffusion)
+    return delta
 
 
 def rollout_loss(model, weather, doy, phase, climate, ends, horizon, scale, features, latitude_weight, augment):
     history_idx = ends[:, None] + torch.arange(-2, 1, device=ends.device)
     history = (weather[history_idx] - climate[doy[history_idx]]) / scale
-    height, width = history.shape[-2:]
-    delta = torch.zeros_like(history[:, -1])
+    clean_count = len(ends)
+    shock_count = max(1, clean_count // 4) if augment else 0
     if augment:
-        delta = synthetic_anomalies(len(ends), height, width, history.device)
-    history = torch.cat((history[:, :-1], (history[:, -1] + delta)[:, None]), dim=1)
+        height, width = history.shape[-2:]
+        delta = synthetic_anomalies(shock_count, height, width, history.device)
+        shock_history = torch.cat((history[:shock_count, :-1],
+                                   (history[:shock_count, -1] + delta)[:, None]), dim=1)
+        history = torch.cat((history, shock_history), dim=0)
     loss = history.new_zeros(())
     for lead in range(1, horizon + 1):
         target_idx = ends + lead
-        history, predicted = forecast_step(model, history, phase[target_idx], climate[doy[target_idx]], scale, features)
+        paired_idx = torch.cat((target_idx, target_idx[:shock_count])) if augment else target_idx
+        history, predictions = forecast_step(model, history, phase[paired_idx], climate[doy[paired_idx]], scale, features)
+        predicted = predictions[:clean_count]
         target = weather[target_idx]
+        paired_loss = loss.new_zeros(())
         if augment:
-            delta = transport_anomaly(delta, weather[target_idx - 1, 2:4])
-            target = target + delta * scale
+            delta = transport_anomaly(delta, weather[target_idx[:shock_count] - 1, 2:4])
+            response = (predictions[clean_count:] - predicted[:shock_count]) / scale
+            # The paired objective teaches response dynamics independently of the weather error.
+            paired_loss = 3.5 * F.mse_loss(response, delta)
         rain = target[:, RAIN].clamp_min(0)
         error = (predicted - target) / scale
         error = (error.square() * latitude_weight).mean()
@@ -72,7 +82,10 @@ def rollout_loss(model, weather, doy, phase, climate, ends, horizon, scale, feat
         pred_std = (predicted / scale).flatten(2).std(dim=-1, correction=0)
         true_std = (target / scale).flatten(2).std(dim=-1, correction=0)
         variance_loss = F.relu(0.76 * true_std - pred_std).square().mean()
-        loss = loss + error + 0.13 * rain_loss + 0.16 * variance_loss
+        rain_std = rain.expm1().flatten(1).std(dim=-1, correction=0)
+        predicted_rain_std = predicted_rain.expm1().flatten(1).std(dim=-1, correction=0)
+        rain_variance_loss = (F.relu(0.76 * rain_std - predicted_rain_std) / 10).square().mean()
+        loss = loss + error + 0.13 * rain_loss + 0.16 * variance_loss + 0.09 * rain_variance_loss + paired_loss
     return loss / horizon
 
 
@@ -89,9 +102,13 @@ def save_checkpoint(path, model, coefficients, scale, raw_static, width, epochs,
         "epochs": epochs,
         "split": split,
     }
-    pending = path.with_suffix(".tmp")
-    torch.save(package, pending)
-    pending.replace(path)
+    with NamedTemporaryFile(dir=path.parent, suffix=".tmp", delete=False) as file:
+        pending = Path(file.name)
+    try:
+        torch.save(package, pending)
+        pending.replace(path)
+    finally:
+        pending.unlink(missing_ok=True)
 
 
 def main():
@@ -100,17 +117,22 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--split", choices=("train", "all"), default="train")
     parser.add_argument("--curriculum", default=DEFAULT_CURRICULUM, help="Comma-separated rollout lengths, one per epoch")
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--width", type=int, default=24)
+    parser.add_argument("--batch-size", type=int, default=48)
+    parser.add_argument("--width", type=int, default=16)
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=("auto", "cpu", "mps", "cuda"), default="auto")
     parser.add_argument("--learning-rate", type=float, default=0.002)
     parser.add_argument("--resume", type=Path, help="Initialize the network from an earlier checkpoint")
     args = parser.parse_args()
-    horizons = [int(value) for value in args.curriculum.split(",")]
+    try:
+        horizons = [int(value) for value in args.curriculum.split(",")]
+    except ValueError:
+        parser.error("--curriculum must be a comma-separated list of integers")
     if min(horizons) < 1 or max(horizons) > 14 or args.width < 4 or args.width % 4:
         parser.error("Rollout lengths must be 1–14 and width must be a positive multiple of four")
+    if args.batch_size < 1 or args.threads < 1 or args.learning_rate <= 0:
+        parser.error("Batch size, thread count, and learning rate must be positive")
 
     torch.set_num_threads(args.threads)
     torch.manual_seed(args.seed)
@@ -141,16 +163,22 @@ def main():
     latitude_weight = (latitude_weight / latitude_weight.mean())[None, None, :, None]
 
     model = AnomalyUNet(args.width).to(device)
+    completed_epochs = 0
     if args.resume:
         package = torch.load(args.resume, map_location="cpu", weights_only=True)
-        if package["split"] != args.split or not np.array_equal(package["climatology"].numpy(), coefficients):
-            parser.error("--resume requires the same training split and climatology")
+        if package["split"] != args.split or package["width"] != args.width:
+            parser.error("--resume requires the same training split and model width")
+        if not np.array_equal(package["climatology"].numpy(), coefficients):
+            parser.error("--resume requires the same dataset and fitted climatology")
         model.load_state_dict(package["model"])
+        completed_epochs = package["epochs"]
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.0001)
     print(f"Device={device}, records={len(data.dates)}, split={args.split}, rollout curriculum={horizons}", flush=True)
     for epoch, horizon in enumerate(horizons, start=1):
         start = time.monotonic()
         ends = rng.permutation(window_ends(data.dates, horizon, args.split))
+        if not len(ends):
+            parser.error(f"No {horizon}-day windows in split {args.split}")
         loss_total = torch.zeros((), device=device)
         for offset in range(0, len(ends), args.batch_size):
             batch = torch.as_tensor(ends[offset:offset + args.batch_size], device=device)
@@ -164,7 +192,8 @@ def main():
         average = float(loss_total.cpu()) / len(ends)
         if not np.isfinite(average):
             raise RuntimeError("Non-finite training loss")
-        save_checkpoint(args.output, model, coefficients, scale, data.static, args.width, epoch, args.split)
+        save_checkpoint(args.output, model, coefficients, scale, data.static, args.width,
+                        completed_epochs + epoch, args.split)
         print(f"Epoch {epoch:02d} lead={horizon} loss={average:.4f} seconds={time.monotonic() - start:.1f}", flush=True)
         if epoch + 2 == len(horizons) and len(horizons) > 3:
             for group in optimizer.param_groups:

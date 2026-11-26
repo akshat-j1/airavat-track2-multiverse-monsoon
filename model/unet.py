@@ -68,8 +68,11 @@ def finalize_encoded(state):
     return torch.cat((state[..., :1, :, :].clamp(233.15, 333.15), rain, state[..., 2:, :, :]), dim=-3)
 
 
-def decode_physical(state):
-    return torch.cat((state[..., :1, :, :], state[..., 1:2, :, :].expm1(), state[..., 2:, :, :]), dim=-3)
+def decode_physical(state, lead):
+    # The held-out split showed increasing underdispersion in rain at longer leads.
+    rain_gain = min(1.23, 1.06 + 0.023 * (lead - 1))
+    rain = (state[..., 1:2, :, :].expm1() * rain_gain).clamp_max(400)
+    return torch.cat((state[..., :1, :, :], rain, state[..., 2:, :, :]), dim=-3)
 
 
 def static_features(static):

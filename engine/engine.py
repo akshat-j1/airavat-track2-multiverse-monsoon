@@ -1,11 +1,13 @@
 """Workflow A's CPU engine for the Track 2 server."""
 
+import math
 from operator import index
 from pathlib import Path
 
 import numpy as np
 import torch
 
+from model.transport import transport_response
 from model.unet import (
     STATE_SHAPE, AnomalyUNet, advance_phase, climatology_at, decode_physical,
     encode_physical, forecast_step, static_features,
@@ -32,9 +34,15 @@ class Engine:
         self._features = static_features(checkpoint["static"].float())[None]
 
     @torch.inference_mode()
-    def _rollout(self, windows, phases, steps):
+    def _rollout(self, windows, phases, steps, perturbed=None):
         """Run an independent forecast for each window in a CPU batch."""
+        if perturbed is not None:
+            windows = torch.cat((windows, perturbed))
+            phases = torch.cat((phases, phases))
         encoded = encode_physical(windows)
+        if perturbed is not None:
+            previous, branched = encoded[:, -1].chunk(2)
+            response = branched - previous
         initial_phases = torch.stack([advance_phase(phases, day) for day in (-2, -1, 0)], dim=1)
         initial_climatology = climatology_at(self._coefficients, initial_phases)
         history = (encoded - initial_climatology) / self._scale
@@ -45,7 +53,19 @@ class Engine:
             history, encoded = forecast_step(
                 self._model, history, future[:, day], climate[:, day], self._scale, self._features,
             )
-            forecast.append(decode_physical(encoded))
+            if perturbed is not None:
+                reference, candidate = encoded.chunk(2)
+                wind = 0.5 * (previous[:, 2:4] + reference[:, 2:4])
+                transported = transport_response(response, wind)
+                branch = reference + 0.20 * (candidate - reference) + 0.80 * transported
+                branch[:, 0].clamp_(233.15, 333.15)
+                branch[:, 1].clamp_(0, math.log1p(400))
+                updated = torch.cat((reference, branch))
+                history[:, -1] = (updated - climate[:, day]) / self._scale
+                response = branch - reference
+                previous = reference
+                encoded = branch
+            forecast.append(decode_physical(encoded, lead=day + 1))
         return torch.stack(forecast, dim=1)
 
     def simulate(self, init_states, doy_sincos, steps, perturbation=None):
@@ -58,16 +78,18 @@ class Engine:
         if not 0.9 <= length <= 1.1:
             raise ValueError("doy_sincos must describe a unit-circle angle")
 
-        # Copy before perturbing the last input, including when the input is a read-only view.
         states = np.array(states, order="C", copy=True)
+        perturbed = None
         if perturbation is not None:
             change = _finite_array(perturbation, STATE_SHAPE, "perturbation")
             if np.any(change):
-                states[-1] += change
-                if not np.isfinite(states[-1]).all():
+                branch = states.copy()
+                branch[-1] += change
+                if not np.isfinite(branch[-1]).all():
                     raise ValueError("perturbed last input contains a non-finite value")
+                perturbed = torch.from_numpy(branch)[None]
         direction = torch.from_numpy(phase / length)
-        forecast = self._rollout(torch.from_numpy(states)[None], direction[None], steps)[0].numpy()
+        forecast = self._rollout(torch.from_numpy(states)[None], direction[None], steps, perturbed)[0].numpy()
         if not np.isfinite(forecast).all():
             raise RuntimeError("The model produced a non-finite forecast")
         return forecast
