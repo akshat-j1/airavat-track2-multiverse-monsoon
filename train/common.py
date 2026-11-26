@@ -1,6 +1,7 @@
 """Read Track 2 data, fit seasonal climatology, and select forecast windows."""
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,7 @@ PERIOD = 365
 HARMONICS = 3
 FOLD_BUFFER_DAYS = 14
 PROXY_ROLLOUT_STEPS = 14
+PROXY_EVENTS_PATH = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "proxy_events.json"
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,10 @@ def time_block_split(dates, start_year, end_year):
     train = tuple(part for part in (slice(0, train_stop), slice(train_start, len(dates)))
                   if part.start < part.stop)
     return train, slice(start, stop)
+
+
+def load_proxy_events():
+    return json.loads(PROXY_EVENTS_PATH.read_text(encoding="utf-8"))
 
 
 def recorded_proxy_cases(audit):

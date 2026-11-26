@@ -14,7 +14,7 @@ from torch.nn import functional as F
 
 from model.unet import CHANNELS, LAT, RAIN, AnomalyUNet, encode_physical, forecast_step, static_features
 from train.common import (
-    DEFAULT_VAL_YEARS, PERIOD, day_phase, exclude_proxy_windows, fit_climatology, load_weather,
+    DEFAULT_VAL_YEARS, PERIOD, day_phase, exclude_proxy_windows, fit_climatology, load_proxy_events, load_weather,
     recorded_proxy_cases, seasonal_fields, time_block_split, validation_start, window_ends,
 )
 
@@ -331,10 +331,9 @@ def main():
             parser.error("The validation partition needs at least three input days and one target day")
         validation_ends = window_ends(validation.stop - validation.start, validation_horizon, "all") + validation.start
         if args.exclude_proxy_windows:
-            audit_path = Path(__file__).with_name("validation.json")
-            audit = json.loads(audit_path.read_text(encoding="utf-8"))["release_candidate_audit"]
+            targets = [date for _, date in recorded_proxy_cases(load_proxy_events())]
             validation_ends = exclude_proxy_windows(
-                data.dates, validation_ends, validation_horizon, [date for _, date in recorded_proxy_cases(audit)]
+                data.dates, validation_ends, validation_horizon, targets
             )
         validation_count = len(validation_ends)
         if not validation_count:

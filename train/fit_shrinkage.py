@@ -12,7 +12,7 @@ import torch
 from engine.engine import CHECKPOINT_NAME, MAX_STEPS, Engine, checkpoint_paths
 from model.unet import CHANNELS, LAT, RAIN, encode_physical
 from train.common import (
-    DEFAULT_VAL_YEARS, day_phase, exclude_proxy_windows, load_weather, recorded_proxy_cases,
+    DEFAULT_VAL_YEARS, day_phase, exclude_proxy_windows, load_proxy_events, load_weather, recorded_proxy_cases,
     validation_start, window_ends,
 )
 
@@ -81,8 +81,7 @@ def main():
         weather = load_weather(args.dataset)
         cut = validation_start(weather.dates, args.val_years)
         check_training_scope(paths, weather.dates[cut])
-        audit = json.loads(Path(__file__).with_name("validation.json").read_text(encoding="utf-8"))
-        targets = [date for _, date in recorded_proxy_cases(audit["release_candidate_audit"])]
+        targets = [date for _, date in recorded_proxy_cases(load_proxy_events())]
         ends = window_ends(len(weather.dates), MAX_STEPS, "validation", val_start=cut)
         ends = exclude_proxy_windows(weather.dates, ends, MAX_STEPS, targets)
         if not len(ends):

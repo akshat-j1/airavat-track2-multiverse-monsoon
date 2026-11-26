@@ -1,6 +1,6 @@
 # Track 2 Engine Contract
 
-This is the internal Python interface for the [official Track 2 v1.0.0 API contract](https://github.com/OfficialAbhinavSingh/yug-monsoon-kit/releases/download/v1.0.0/API_CONTRACT.md). Workflow B uses this interface from `serve.py`.
+This is the Python interface that `serve.py` uses to implement the [official Track 2 v1.0.0 API contract](https://github.com/OfficialAbhinavSingh/yug-monsoon-kit/releases/download/v1.0.0/API_CONTRACT.md).
 
 ```python
 # engine/engine.py
@@ -37,4 +37,4 @@ Use `stats.json` only for internal normalization. Bundle `land_sea_mask` and `or
 
 Rollouts must be deterministic for identical inputs, contain only finite values, and return nonnegative precipitation. An explicit all-zero perturbation must produce exactly the same output as `None` under `numpy.array_equal`. Inference may write only to `/tmp`.
 
-Workflow B implements the same interface in `engine/stub_engine.py` for development.
+The development stub in `engine/stub_engine.py` implements the same interface.

@@ -1,7 +1,7 @@
-# Part B integration verification
+# Server and dashboard integration verification
 
-The local `app` branch merged Part A's `9ba482f` without conflicts. Local app
-work was preserved first in `593cb66`. Git LFS materialized the 344,546-byte
+The integration combined server and dashboard changes from `593cb66` with
+model changes from `9ba482f`. Verification used the 344,546-byte
 `weights/airavat.pt` checkpoint. Its SHA-256 is
 `30143677fb684a5e3daa92efcc7042de174d63c2ad07d7d509da9b258899796d`.
 
