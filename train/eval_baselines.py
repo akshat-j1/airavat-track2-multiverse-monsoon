@@ -1,4 +1,4 @@
-"""Evaluate 2005–2019 climatology and persistence on daily 2020–2021 windows."""
+"""Evaluate training-only climatology and persistence on held-out daily windows."""
 
 import argparse
 import json
@@ -7,15 +7,19 @@ from pathlib import Path
 import numpy as np
 
 from model.unet import LAT, RAIN
-from train.common import LEADS, TRAIN_END, fit_climatology, load_weather, seasonal_fields, window_ends
+from train.common import (
+    DEFAULT_VAL_YEARS, LEADS, PERIOD, fit_climatology, load_weather,
+    seasonal_fields, validation_start, window_ends, year_range,
+)
 
 
-def validation_cases(weather, stride=1):
-    ends = window_ends(weather.dates, max(LEADS), "validation")[::stride]
+def validation_cases(weather, val_start, stride=1):
+    ends = window_ends(len(weather.dates), max(LEADS), "validation", val_start=val_start)[::stride]
+    if not len(ends):
+        raise ValueError("No complete forecast windows in the validation period")
     targets = ends[:, None] + np.asarray(LEADS)
-    train = weather.dates < TRAIN_END
-    coefficients = fit_climatology(weather.physical[train], weather.day_of_year[train])
-    climatology = seasonal_fields(coefficients)[weather.day_of_year[targets] % 365]
+    coefficients = fit_climatology(weather.physical[:val_start], weather.day_of_year[:val_start])
+    climatology = seasonal_fields(coefficients)[weather.day_of_year[targets] % PERIOD]
     climatology[:, :, RAIN] = np.maximum(climatology[:, :, RAIN], 0)
     persistence = np.broadcast_to(weather.physical[ends, None], climatology.shape)
     return ends, weather.physical[targets], persistence, climatology
@@ -36,9 +40,17 @@ def forecast_metrics(prediction, target):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dataset", type=Path)
+    parser.add_argument("--val-years", type=int, default=DEFAULT_VAL_YEARS)
     args = parser.parse_args()
-    ends, truth, persistence, climatology = validation_cases(load_weather(args.dataset))
+    weather = load_weather(args.dataset)
+    try:
+        val_start = validation_start(weather.dates, args.val_years)
+        ends, truth, persistence, climatology = validation_cases(weather, val_start)
+    except ValueError as exc:
+        parser.error(str(exc))
     print(json.dumps({
+        "training_years": year_range(weather.dates[:val_start]),
+        "validation_years": year_range(weather.dates[val_start:]),
         "windows": len(ends), "leads": LEADS,
         "persistence": forecast_metrics(persistence, truth),
         "climatology": forecast_metrics(climatology, truth),
