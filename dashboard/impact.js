@@ -20,13 +20,12 @@
     rainDeficit: {name: 'Rain-deficit index', unit: 'index', colors: ['#64b9b1', '#ded8b7', '#df956a']},
     heavyRainDays: {name: 'Heavy-rain days', unit: 'days', colors: ['#263652', '#818bb9', '#d1b9e5']}
   };
-  const impactDefaults = {heatC: 40, need: 4, heavyRainMm: 64.5, rainUnit: 'mm'};
+  const impactDefaults = {heatC: 40, need: 4, heavyRainMm: 64.5};
   function impactThresholds(options = {}) {
     const thresholds = {...impactDefaults, ...options};
     if (!Number.isFinite(thresholds.heatC) || thresholds.heatC < -100 || thresholds.heatC > 100) throw new Error('Heat threshold must be between −100 and 100 °C.');
     if (!Number.isFinite(thresholds.need) || thresholds.need <= 0) throw new Error('Daily rain need must be greater than zero.');
     if (!Number.isFinite(thresholds.heavyRainMm) || thresholds.heavyRainMm <= 0) throw new Error('Heavy-rain threshold must be greater than zero.');
-    if (!['mm', 'm'].includes(thresholds.rainUnit)) throw new Error('Rollout tp units must be mm or m per daily step.');
     return thresholds;
   }
   // Only forecast t2m (K) and tp enter these metrics. The mask selects cells;
@@ -45,7 +44,7 @@
       for (const day of rollout) {
         // Compare in Kelvin to preserve exact equality at a Celsius threshold.
         if (day[0][r][c] > thresholds.heatC + 273.15) heatDays++;
-        const rain = day[1][r][c] * (thresholds.rainUnit === 'm' ? 1000 : 1);
+        const rain = day[1][r][c];
         if (rain < 0) throw new Error('Rollout contains negative precipitation.');
         cumulativeRain += rain;
         if (rain >= thresholds.heavyRainMm) heavyRainDays++;
@@ -91,7 +90,7 @@
       const ids = ['impact-heat', 'impact-need', 'impact-heavy'];
       if (ids.some(id => !$(id).value.trim())) throw new Error('Enter all three indicative thresholds.');
       return impactThresholds({heatC: Number($('impact-heat').value), need: Number($('impact-need').value),
-        heavyRainMm: Number($('impact-heavy').value), rainUnit: $('impact-rain-unit').value});
+        heavyRainMm: Number($('impact-heavy').value)});
     }
     function render() {
       const {result, grid, centre, radius} = getContext();
@@ -109,7 +108,7 @@
           if (!comparison.prime.landCells) message = 'The supplied land mask contains no land cells (mask ≥ 0.5).';
         } catch (error) {message = error.message;}
       }
-      $('impact-status').textContent = message || `Indicative only · all ${comparison.prime.steps} returned forecast days · ${comparison.prime.landCells} land cells · tp interpreted as ${thresholds.rainUnit} per daily step.`;
+      $('impact-status').textContent = message || `Indicative only · all ${comparison.prime.steps} returned forecast days · ${comparison.prime.landCells} land cells · rain in mm/day.`;
       $('impact-content').hidden = Boolean(message);
       if (message) {comparison = null; cachedResult = null; return;}
       for (const key of Object.keys(impactLayers)) {
@@ -147,7 +146,7 @@
       for (const sentence of impactPolicySentences(comparison)) {const item = document.createElement('li'); item.textContent = sentence; policy.append(item);}
     }
     for (const id of ['impact-heat', 'impact-need', 'impact-heavy']) $(id).addEventListener('input', render);
-    for (const id of ['impact-layer', 'impact-timeline', 'impact-rain-unit']) $(id).addEventListener('change', render);
+    for (const id of ['impact-layer', 'impact-timeline']) $(id).addEventListener('change', render);
     for (const id of ['impact-map', 'impact-delta-map']) {
       const canvas = $(id);
       canvas.addEventListener('mousemove', event => {hover = M.pickCell(canvas, getContext().grid, event); render();});
@@ -155,27 +154,44 @@
     }
     return {render};
   }
-  function drawChart(canvas, values, activeDay, color, unit) {
+  function drawChart(canvas, values, activeDay, color, unit, band = null) {
     const {ctx, w, h} = M.canvasContext(canvas), pad = {l: 39, r: 12, t: 10, b: 25};
     const plotW = Math.max(1, w - pad.l - pad.r), plotH = h - pad.t - pad.b;
     ctx.clearRect(0, 0, w, h); ctx.font = '10px system-ui';
     if (!values || !values.length) {ctx.fillStyle = '#97a9b7'; ctx.textAlign = 'center'; ctx.fillText('Run both timelines to see the response', w / 2, h / 2); return;}
-    const max = Math.max(...values, 0) || 1;
+    const minimum = band ? Math.min(...band.map(day => day.low)) : 0;
+    const maximum = band ? Math.max(...band.map(day => day.high)) : Math.max(...values, 0);
+    const span = Math.max(maximum - minimum, band ? .05 : 1);
     const x = i => pad.l + (values.length === 1 ? plotW / 2 : i / (values.length - 1) * plotW);
-    const y = value => pad.t + plotH - value / max * plotH;
+    const y = value => pad.t + plotH - (value - minimum) / span * plotH;
     for (let i = 0; i <= 2; i++) {
-      const value = max * i / 2, yy = y(value);
+      const value = minimum + span * i / 2, yy = y(value);
       ctx.strokeStyle = '#2a3945'; ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(w - pad.r, yy); ctx.stroke();
       ctx.fillStyle = '#97a9b7'; ctx.textAlign = 'right'; ctx.fillText(value >= 100 ? Math.round(value).toString() : Number(value.toPrecision(2)).toString(), pad.l - 6, yy + 3);
     }
-    ctx.beginPath(); ctx.moveTo(x(0), y(0)); values.forEach((v, i) => ctx.lineTo(x(i), y(v))); ctx.lineTo(x(values.length - 1), y(0)); ctx.closePath();
-    ctx.fillStyle = color + '14'; ctx.fill();
+    ctx.beginPath();
+    if (band) {
+      if (band.length === 1) {
+        const top = y(band[0].high), bottom = y(band[0].low);
+        ctx.rect(x(0) - 4, top, 8, Math.max(1, bottom - top));
+      } else {
+        band.forEach((day, i) => i ? ctx.lineTo(x(i), y(day.high)) : ctx.moveTo(x(i), y(day.high)));
+        for (let i = band.length - 1; i >= 0; i--) ctx.lineTo(x(i), y(band[i].low));
+        ctx.closePath();
+      }
+    } else {
+      ctx.moveTo(x(0), y(0)); values.forEach((v, i) => ctx.lineTo(x(i), y(v))); ctx.lineTo(x(values.length - 1), y(0)); ctx.closePath();
+    }
+    ctx.fillStyle = color + (band ? '44' : '14'); ctx.fill();
     ctx.beginPath(); values.forEach((v, i) => i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v))); ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
-    ctx.strokeStyle = '#647e8a'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(x(activeDay), pad.t); ctx.lineTo(x(activeDay), y(0)); ctx.stroke(); ctx.setLineDash([]);
+    ctx.strokeStyle = '#647e8a'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(x(activeDay), pad.t); ctx.lineTo(x(activeDay), y(minimum)); ctx.stroke(); ctx.setLineDash([]);
     ctx.beginPath(); ctx.arc(x(activeDay), y(values[activeDay]), 4, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
     ctx.fillStyle = '#97a9b7'; ctx.textAlign = 'left'; ctx.fillText('Day 1', pad.l, h - 5); ctx.textAlign = 'right';
     if (values.length > 1) ctx.fillText(`Day ${values.length}`, w - pad.r, h - 5);
-    canvas.setAttribute('aria-label', `${unit} by day: ${values.map((v, i) => `${i + 1}: ${v.toPrecision(4)}`).join(', ')}`);
+    canvas.setAttribute('aria-label', `${unit} by day: ${values.map((v, i) => {
+      const range = band ? `, range ${band[i].low.toPrecision(4)} to ${band[i].high.toPrecision(4)}` : '';
+      return `${i + 1}: ${v.toPrecision(4)}${range}`;
+    }).join(', ')}`);
   }
   Object.assign(M, {responseMetrics, maxAbsDiff, drawChart, impactLayers, impactDefaults, impactThresholds,
     computeLandImpacts, compareLandImpacts, impactPolicySentences, createImpactPanel});

@@ -1,20 +1,24 @@
 (function (M) {
   'use strict';
   const $ = id => document.getElementById(id);
-  const state = {grid: null, init: null, doyOverride: null, result: null, centre: null, secondary: null, day: 0, hover: null, busy: false, lastRequest: null, timer: null};
+  const state = {grid: null, init: null, doyOverride: null, result: null, ensemble: null, centre: null, secondary: null, day: 0, hover: null, busy: false, lastRequest: null, timer: null};
   const mapIds = ['prime', 'branch', 'difference'];
   const format = value => Number(value.toPrecision(5)).toLocaleString(undefined, {maximumFractionDigits: 4});
   function status(text, error = false) {$('status').textContent = text; $('status').classList.toggle('error', error);}
   function stop() {clearInterval(state.timer); state.timer = null; $('play').textContent = '▶'; $('play').setAttribute('aria-label', 'Play forecast');}
   function invalidate() {
-    stop(); state.result = null; state.day = 0; state.hover = null;
+    stop(); state.result = null; state.ensemble = null; state.day = 0; state.hover = null;
     $('day').value = 0; $('day').disabled = true; $('play').disabled = true;
     $('sanity-result').textContent = 'Compare an explicit zero array with the base.';
     status('Settings updated. Run both timelines to see a forecast.'); render();
   }
-  function settings() {
-    const doy = Number($('doy').value), steps = Number($('steps').value), radius = Number($('radius').value), magnitude = Number($('magnitude').value);
+  function inputDay() {
+    const doy = Number($('doy').value);
     if (!$('doy').value || !Number.isInteger(doy) || doy < 1 || doy > 366) throw new Error('Day of year must be an integer from 1 to 366.');
+    return doy;
+  }
+  function settings() {
+    const doy = inputDay(), steps = Number($('steps').value), radius = Number($('radius').value), magnitude = Number($('magnitude').value);
     if (!$('steps').value || !Number.isInteger(steps) || steps < 1 || steps > 14) throw new Error('Forecast days must be an integer from 1 to 14.');
     if (!$('radius').value || !Number.isFinite(radius) || radius < 1 || radius > 12) throw new Error('Radius must be between 1 and 12 cells.');
     if (!$('magnitude').value || !Number.isFinite(magnitude) || Math.abs(magnitude) > 10000) throw new Error('Magnitude must be finite and between −10000 and 10000.');
@@ -48,7 +52,13 @@
       M.drawMap($(id), state.grid, data[id][state.day][view], isDiff ? diffScale : scale, colors, state.centre, previewSettings().radius, state.hover);
       legend(id + '-legend', isDiff ? diffScale : scale, colors, `${isDiff ? 'Δ ' : ''}${channel.id} · ${channel.unit}`);
     }
-    $('result-mode').textContent = state.result ? 'FORECAST · TWO TIMELINES' : 'INITIAL STATE · PREVIEW';
+    $('result-mode').textContent = state.result ? 'LIVE FORECAST · TWO TIMELINES' : 'INITIAL STATE · PREVIEW';
+    $('prime-title').textContent = state.result ? 'Timeline Prime' : 'Last input day';
+    $('branch-title').textContent = state.result ? 'Branch' : 'Input with shock';
+    $('difference-title').textContent = state.result ? 'Difference' : 'Proposed shock';
+    $('prime-mode').textContent = state.result ? 'BASE FORECAST' : 'INPUT';
+    $('branch-mode').textContent = state.result ? 'PERTURBED FORECAST' : 'PREVIEW';
+    $('difference-mode').textContent = state.result ? 'BRANCH − PRIME' : 'PREVIEW';
     $('day-label').textContent = state.result ? `Day ${state.day + 1}` : 'Input day · shock preview';
     $('day-total').textContent = `/ ${$('steps').value || '—'} days`;
     $('timing').textContent = state.result ? `Prime ${format(state.result.primeMs)} ms · Branch ${format(state.result.branchMs)} ms` : 'No forecast yet';
@@ -58,8 +68,11 @@
     $('magnitude-unit').textContent = M.config.channels[Number($('shock-channel').value)].unit;
     $('chart-channel').textContent = `${channel.name} · ${channel.id}`;
     const metrics = state.result ? M.responseMetrics(data.difference, view) : null;
-    M.drawChart($('footprint-chart'), metrics && metrics.map(d => d.footprint), state.day, '#72d5c3', '90% energy footprint (cells)');
-    M.drawChart($('peak-chart'), metrics && metrics.map(d => d.peak), state.day, '#f4bd72', `Peak absolute response (${channel.unit})`);
+    $('response-charts').hidden = !metrics;
+    if (metrics) {
+      M.drawChart($('footprint-chart'), metrics.map(d => d.footprint), state.day, '#72d5c3', '90% energy footprint (cells)');
+      M.drawChart($('peak-chart'), metrics.map(d => d.peak), state.day, '#f4bd72', `Peak absolute response (${channel.unit})`);
+    }
     $('footprint-stat').textContent = metrics ? `${metrics[state.day].footprint} cells` : '—';
     $('peak-stat').textContent = metrics ? `${format(metrics[state.day].peak)} ${channel.unit}` : '—';
     if (state.hover) {
@@ -67,6 +80,38 @@
       $('hover').textContent = `${state.grid.lat[r][c].toFixed(2)}°N, ${state.grid.lon[r][c].toFixed(2)}°E · Prime ${format(data.prime[state.day][view][r][c])} · Branch ${format(data.branch[state.day][view][r][c])} · Δ ${format(data.difference[state.day][view][r][c])} ${channel.unit}`;
     } else $('hover').textContent = 'Hover a cell to inspect all three timelines.';
     if (state.impactPanel) state.impactPanel.render();
+    renderEnsemble();
+  }
+  function renderEnsemble() {
+    $('ensemble-panel').hidden = !state.result;
+    $('run-ensemble').disabled = state.busy || !state.grid.mask;
+    $('ensemble-results').hidden = true;
+    if (!state.result) return;
+    if (!state.grid.mask) {
+      $('ensemble-status').textContent = 'Land sensitivity estimates require the land mask.';
+      return;
+    }
+    if (!state.ensemble) return;
+    try {
+      const {members} = state.ensemble;
+      const heatInput = $('impact-heat').value, rainInput = $('impact-heavy').value;
+      if (!heatInput || !rainInput) throw new Error('Enter the heat and heavy-rain thresholds.');
+      const thresholds = M.impactThresholds({heatC: Number(heatInput), heavyRainMm: Number(rainInput)});
+      const key = `${thresholds.heatC}/${thresholds.heavyRainMm}`;
+      if (key !== state.ensemble.thresholds) {
+        state.ensemble.summary = M.summarizeEnsemble(members, state.grid.mask, thresholds);
+        state.ensemble.thresholds = key;
+      }
+      const summary = state.ensemble.summary;
+      const temperature = summary.map(day => day.temperature);
+      const rain = summary.map(day => day.rain);
+      const {heatProbability, heavyProbability} = summary[state.day];
+      $('ensemble-results').hidden = false;
+      M.drawChart($('ensemble-temperature'), temperature.map(day => day.median), state.day, '#f4bd72', 'Temperature (°C)', temperature);
+      M.drawChart($('ensemble-rain'), rain.map(day => day.median), state.day, '#72d5c3', 'Rainfall (mm/day)', rain);
+      $('ensemble-status').textContent = `${members.length} live forecasts · mean land-cell exceedance probabilities by day`;
+      $('ensemble-exceedance').textContent = `Day ${state.day + 1} · Heat above ${thresholds.heatC} °C: ${(100 * heatProbability).toFixed(1)}% · Rain at or above ${thresholds.heavyRainMm} mm/day: ${(100 * heavyProbability).toFixed(1)}%`;
+    } catch (error) {$('ensemble-status').textContent = error.message;}
   }
   function applyPreset() {
     const preset = M.config.presets[$('preset').value];
@@ -77,7 +122,8 @@
   }
   function setBusy(busy) {
     state.busy = busy;
-    for (const id of ['run', 'sanity', 'demo', 'upload', 'doy', 'steps', 'preset', 'shock-channel', 'magnitude', 'radius']) $(id).disabled = busy;
+    for (const id of ['run', 'sanity', 'demo', 'spin-up', 'upload', 'upload-rain', 'doy', 'steps', 'preset', 'shock-channel', 'magnitude', 'radius']) $(id).disabled = busy;
+    $('run-ensemble').disabled = busy || !state.grid.mask;
     $('run').textContent = busy ? 'Computing timelines…' : 'Run both timelines ↗';
     if (busy) stop();
   }
@@ -106,12 +152,51 @@
         status(`${passed ? 'PASS' : 'FAIL'}: zero-shock comparison · max absolute difference ${max}.`, !passed);
       } else {
         state.result = {prime: prime.rollout, branch: branch.rollout, difference: M.difference(branch.rollout, prime.rollout),
-          primeMs: Number.isFinite(prime.inference_ms) ? prime.inference_ms : 0, branchMs: Number.isFinite(branch.inference_ms) ? branch.inference_ms : 0};
+          payload, primeMs: Number.isFinite(prime.inference_ms) ? prime.inference_ms : 0,
+          branchMs: Number.isFinite(branch.inference_ms) ? branch.inference_ms : 0};
+        state.ensemble = null; $('ensemble-status').textContent = 'Run the ensemble to compare nearby scenarios.';
         state.day = 0; $('day').value = 0; $('day').max = s.steps - 1; $('day').disabled = false; $('play').disabled = s.steps < 2;
         status(`Both timelines ready · ${s.steps} daily steps. Move the slider or press play to follow the response.`); render();
       }
     } catch (error) {status(`Simulation failed: ${error.message}`, true); if (sanity) $('sanity-result').textContent = 'FAIL · request did not complete';}
     finally {setBusy(false); health();}
+  }
+  async function runEnsemble() {
+    if (!state.result || !state.grid.mask || state.busy) return;
+    const {payload, prime} = state.result;
+    const members = [prime], count = M.ensemblePerturbedMembers;
+    state.ensemble = null; $('ensemble-results').hidden = true;
+    setBusy(true);
+    try {
+      for (let member = 0; member < count; member++) {
+        $('ensemble-status').textContent = `Running perturbation ${member + 1} of ${count}…`;
+        const perturbation = M.sensitivityPerturbation(payload.init_states[2]);
+        const response = await M.api('/simulate', {...payload, perturbation});
+        members.push(response.rollout);
+      }
+      state.ensemble = {members};
+      renderEnsemble();
+    } catch (error) {$('ensemble-status').textContent = `Ensemble failed: ${error.message}`;}
+    finally {setBusy(false);}
+  }
+  async function spinUp() {
+    let doy;
+    try {doy = inputDay();} catch (error) {status(error.message, true); return;}
+    setBusy(true);
+    status('Running 14 days from the synthetic seed…');
+    try {
+      const payload = {init_states: M.demoWindow(state.grid), doy_sincos: M.seasonal(doy), steps: 14};
+      const response = await M.api('/simulate', payload);
+      state.init = response.rollout.slice(-3);
+      state.doyOverride = null;
+      state.lastRequest = payload; $('export').disabled = false;
+      $('doy').value = ((doy - 1 + payload.steps) % 365) + 1;
+      $('upload').value = '';
+      $('window-info').textContent = 'Model-generated · days 12–14 of synthetic spin-up';
+      invalidate();
+      status('Model-generated start state ready. Run both timelines to forecast from it.');
+    } catch (error) {status(`Spin-up failed: ${error.message}`, true);}
+    finally {setBusy(false);}
   }
   async function init() {
     M.config.channels.forEach((channel, index) => {
@@ -129,12 +214,16 @@
     $('magnitude').addEventListener('input', () => {if (!state.secondary) {$('preset').value = 'custom'; $('preset-info').textContent = 'Custom magnitude · raised-cosine bump';} else $('preset-info').textContent = `u10 ${$('magnitude').value} m/s + tcwv ${Number($('magnitude').value) * 2} kg/m²`; invalidate();});
     $('shock-channel').addEventListener('change', () => {$('preset').value = 'custom'; state.secondary = null; $('preset-info').textContent = 'Custom channel · raised-cosine bump'; invalidate();});
     $('demo').addEventListener('click', () => {state.init = M.demoWindow(state.grid); state.doyOverride = null; $('window-info').textContent = 'Synthetic demo · 3 input days'; $('upload').value = ''; invalidate();});
+    $('spin-up').addEventListener('click', spinUp);
+    $('run-ensemble').addEventListener('click', runEnsemble);
+    for (const id of ['impact-heat', 'impact-heavy']) $(id).addEventListener('input', renderEnsemble);
     $('upload').addEventListener('change', async event => {
       const file = event.target.files[0]; if (!file) return;
-      if (file.size > 20 * 1024 * 1024) {status('Window JSON exceeds the 20 MB limit.', true); return;}
+      if (file.size > 8 * 1024 * 1024) {status('Window JSON exceeds the 8 MiB limit.', true); return;}
       setBusy(true);
       try {
-        const parsed = M.parseWindow(JSON.parse(await file.text())); state.init = parsed.init; state.doyOverride = parsed.doy || null;
+        const parsed = M.parseWindow(JSON.parse(await file.text()), $('upload-rain').value);
+        state.init = parsed.init; state.doyOverride = parsed.doy || null;
         if (parsed.doy) {const angle = Math.atan2(parsed.doy[0], parsed.doy[1]); $('doy').value = Math.max(1, Math.round((angle < 0 ? angle + 2 * Math.PI : angle) * 365 / (2 * Math.PI)));}
         $('window-info').textContent = `${file.name} · 3 input days`; invalidate();
       } catch (error) {status(`Upload rejected: ${error.message}`, true);}

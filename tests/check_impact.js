@@ -8,7 +8,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const context = {window: {Monsoon: {config: {height: 32, width: 36}}}};
-for (const file of ['core.js', 'impact.js']) {
+for (const file of ['core.js', 'impact.js', 'ensemble.js']) {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'dashboard', file), 'utf8'), context, {filename: file});
 }
 const M = context.window.Monsoon;
@@ -53,11 +53,14 @@ check('editable thresholds recompute without changing the rollout', () => {
   assert.equal(revised.fields.rainDeficit[0][0], 1 - 68 / 24);
   assert.equal(prime[0][0][0][0], 313.15);
 });
-check('optional metres-to-mm conversion precedes all rainfall metrics', () => {
-  const meters = rollout([313.15, 314.15], [.0645, .001]);
-  const converted = M.computeLandImpacts(meters, mask, {rainUnit: 'm'});
+check('metres-to-mm conversion happens only when importing a window', () => {
+  const meters = rollout([313.15, 314.15, 313.15], [.0645, .001, 0]);
+  const imported = M.parseWindow(meters, 'm');
+  const converted = M.computeLandImpacts(imported.init, mask);
   assert.equal(converted.fields.cumulativeRain[0][0], 65.5);
   assert.equal(converted.fields.heavyRainDays[0][0], 1);
+  assert.equal(meters[0][1][0][0], .0645);
+  assert.equal(M.computeLandImpacts(meters, mask, {rainUnit: 'm'}).fields.heavyRainDays[0][0], 0);
 });
 const branch = JSON.parse(JSON.stringify(prime));
 branch[0][0][0][0] += 2; branch[2][1][0][0] += 1;
@@ -96,5 +99,29 @@ check('policy templates use computed comparisons and carry indicative labels', (
   assert(sentences.every(sentence => sentence.startsWith('Indicative')));
   assert(sentences[0].includes('0.5 more days above 40 °C'));
   assert(sentences[1].includes('34.5 mm in Branch'));
+});
+check('ensemble bands and exceedance probabilities use land cells and real members', () => {
+  const first = rollout([313.15], [64.5]);
+  const second = rollout([315.15], [63]);
+  second[0][0][0][1] = 273.15;
+  second[0][1][0][1] = 0;
+  const [summary] = M.summarizeEnsemble([first, second], mask, M.impactDefaults);
+  assert.equal(summary.heatProbability, .25);
+  assert.equal(summary.heavyProbability, .5);
+  assert.equal(summary.rain.low, 31.5);
+  assert.equal(summary.rain.high, 64.5);
+  assert.equal(summary.rain.median, 48);
+});
+check('ensemble perturbations are localized, small, and respect input bounds', () => {
+  const last = rollout([350], [0])[0];
+  const draws = [.1, .5, .5, .1, .9, .5];
+  const delta = M.sensitivityPerturbation(last, () => draws.shift());
+  assert.equal(delta[0][16][18], 0);
+  last[0][16][18] = 300;
+  const reroll = [.1, .5, .5, .1, .9, .5];
+  const shifted = M.sensitivityPerturbation(last, () => reroll.shift());
+  assert(shifted[0][16][18] > 0 && shifted[0][16][18] < .8);
+  assert.equal(shifted[0][0][0], 0);
+  assert.equal(shifted[2][16][18], 0);
 });
 process.exitCode = failures ? 1 : 0;

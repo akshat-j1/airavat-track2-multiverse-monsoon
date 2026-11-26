@@ -46,11 +46,17 @@
         34 + 18 * wet + 4 * wave][channel];
     })));
   }
-  function parseWindow(value) {
-    const init = Array.isArray(value) ? value : value.init_states;
+  function parseWindow(value, rainUnit = 'mm') {
+    let init = Array.isArray(value) ? value : value?.init_states;
     if (!shape(init, [3, 6, H, W])) throw new Error('Window must contain finite init_states with shape [3,6,32,36].');
     const doy = !Array.isArray(value) ? value.doy_sincos : undefined;
     if (doy !== undefined && !shape(doy, [2])) throw new Error('doy_sincos must be two finite numbers.');
+    if (!['mm', 'm'].includes(rainUnit)) throw new Error('Uploaded rainfall must be in mm/day or m/day.');
+    if (rainUnit === 'm') {
+      init = init.map(day => day.map((field, channel) => channel === 1
+        ? field.map(row => row.map(v => v * 1000)) : field));
+      if (!shape(init, [3, 6, H, W])) throw new Error('Rainfall conversion produced a nonfinite input.');
+    }
     return {init, doy};
   }
   function nearest(grid, lat, lon) {
