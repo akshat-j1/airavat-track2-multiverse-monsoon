@@ -774,3 +774,146 @@ with days 1–4. Mean early and late drift across the 20 rollouts was
 disturbance rollouts. Exact output-bound hits were absent in E4 and E5.
 The judge and drift goals remain unmet. The weak-wind transport-change
 condition did not trigger.
+
+## Step 9 — Submission preflight
+
+The extended training archive is absent and no candidate cleared the earlier
+forecast and causality gates. Full-archive retraining was not run. The
+existing checkpoint remains the submission file. Added the extended-archive
+build commands to the training README and appended the available held-out
+diagnostics to `train/validation.json`. The new validation section identifies
+the smoke bundles and records their commands, seed, data span, and evaluation
+environment. It contains no E0 in-sample forecast numbers.
+
+### Clean-clone verification of the existing checkpoint
+
+```powershell
+$clone = Join-Path $env:TEMP ('airavat-submission-' + [Guid]::NewGuid().ToString('N'))
+$env:GIT_LFS_SKIP_SMUDGE = '1'
+git clone --no-local --single-branch --branch fix/calibration . $clone
+git -C $clone check-attr filter -- weights/airavat.pt
+git -C $clone cat-file -s HEAD:weights/airavat.pt
+@'
+import json, os, socket, subprocess, sys, time
+from pathlib import Path
+from urllib.request import urlopen
+
+from monsoon_r1 import repo_scan
+
+clone = Path(sys.argv[1]).resolve()
+runtime = Path("tests/_windows/runtime/Scripts/python.exe").resolve()
+status = ["git", "-C", str(clone), "--no-optional-locks", "status", "--porcelain"]
+assert not subprocess.check_output(status).strip()
+print("clean clone", subprocess.check_output(["git", "-C", str(clone), "rev-parse", "HEAD"], text=True).strip(), flush=True)
+scan = repo_scan.scan(clone)
+print("repo_scan.scan()", json.dumps(scan), flush=True)
+assert scan["points"] == 15 and not scan["flags"]
+weights = list((clone / "weights").glob("*.pt"))
+for weight in weights:
+    with weight.open("rb") as stream:
+        assert not stream.read(64).startswith(b"version https://git-lfs.github.com/spec/v1")
+total_bytes = sum(weight.stat().st_size for weight in weights)
+assert 0 < total_bytes < 50_000_000
+print("Git blob weights", [(weight.name, weight.stat().st_size) for weight in weights],
+      "total_bytes", total_bytes, "< 50000000 PASS", flush=True)
+
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+url = f"http://127.0.0.1:{port}"
+env = dict(os.environ, OMP_NUM_THREADS="4", MKL_NUM_THREADS="4", PYTHONDONTWRITEBYTECODE="1")
+env.pop("MONSOON_DEV_STUB", None)
+command = [str(runtime), "-B", "serve.py", "--host", "127.0.0.1", "--port", str(port)]
+print(subprocess.list2cmdline(command), flush=True)
+server = subprocess.Popen(command, env=env, cwd=clone)
+try:
+    for _ in range(150):
+        if server.poll() is not None:
+            raise RuntimeError("serve.py exited before readiness")
+        try:
+            with urlopen(url + "/health", timeout=1) as response:
+                health = json.load(response)
+            break
+        except OSError:
+            time.sleep(0.1)
+    else:
+        raise TimeoutError("Server did not start")
+    print("GET /health", json.dumps(health), flush=True)
+    assert health == {"status": "ready", "model_name": "airavat-anomaly-unet"}
+    validator = [sys.executable, "-B", "-m", "monsoon_r1.schema_validator", url]
+    print(subprocess.list2cmdline(validator), flush=True)
+    subprocess.run(validator, cwd=clone, env=env, check=True)
+finally:
+    if server.poll() is None:
+        server.terminate()
+        server.wait(timeout=10)
+assert not subprocess.check_output(status).strip()
+print("clean clone startup, repo scan, schema validator, and plain weight size PASS", flush=True)
+'@ | & .venv/Scripts/python.exe -B - $clone
+```
+
+```text
+weights/airavat.pt: filter: unspecified
+344546
+clean clone a0124434d44199d1dcf68e5e272ee7c819e16f58
+repo_scan.scan() points=15.0 anti_cheat_points=8.0 code_health_points=7.0 flags=[]
+Git blob weights [('airavat.pt', 344546)] total_bytes 344546 < 50000000 PASS
+[serve] ready: model_name=airavat-anomaly-unet
+GET /health {"status": "ready", "model_name": "airavat-anomaly-unet"}
+health: OK
+  [JSON lists (canonical)] no perturbation  OK   0.25s
+  [JSON lists (canonical)] warm_ocean      OK   0.27s
+  [JSON lists (canonical)] zeros           OK   0.20s
+  [base64 (also tolerated)] no perturbation OK  0.17s
+  [base64 (also tolerated)] warm_ocean      OK  0.22s
+  [base64 (also tolerated)] zeros           OK  0.16s
+RESULT: all checks passed
+clean clone startup, repo scan, schema validator, and plain weight size PASS
+```
+
+The clean checkout stayed clean after verification. These checks apply to
+the existing Git blob. The new extended-data submission remains pending.
+
+### Local archive-build smoke test
+
+This exercises the documented merge and export using adjacent five-day
+samples from the organizer archive. It checks exact preservation of the
+second sample's fields and static grid. The historical data download was
+outside this local test.
+
+```powershell
+@'
+from pathlib import Path
+import re
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+
+import xarray as xr
+from train.common import load_weather
+
+readme = Path("train/README.md").read_text(encoding="utf-8")
+section = readme.split("## Build the extended training archive", 1)[1].split("## Reproduce the shipped checkpoint", 1)[0]
+convert, export = re.findall(r"<<'PY'\n(.*?)\nPY\n", section, re.S)
+with TemporaryDirectory(prefix="airavat-archive-smoke-") as directory:
+    work = Path(directory)
+    with xr.open_dataset("tests/_windows/india_climate_train.nc") as source:
+        source.isel(time=slice(0, 5)).to_netcdf(work / "history.nc")
+        source.isel(time=slice(5, 10)).to_netcdf(work / "organizer.nc")
+    python = [sys.executable, "-B"]
+    for stem in ("history", "organizer"):
+        subprocess.run([*python, "-c", convert, str(work / f"{stem}.nc"), str(work / f"{stem}.npz")], check=True)
+    subprocess.run([*python, "-m", "monsoon_r1.build_dataset", "merge", "--parts",
+                    str(work / "history.npz"), str(work / "organizer.npz"),
+                    "--out", str(work / "extended.npz")], check=True)
+    subprocess.run([*python, "-c", export, str(work / "organizer.nc"),
+                    str(work / "extended.npz"), str(work / "extended.nc")], check=True)
+    assert len(load_weather(work / "extended.nc").dates) == 10
+    print("Local archive merge/export round trip PASS (10 days)", flush=True)
+'@ | & .venv/Scripts/python.exe -B -
+```
+
+```text
+merged (10, 6, 32, 36) 2005-01-01 2005-01-10
+Local archive merge/export round trip PASS (10 days)
+```

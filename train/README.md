@@ -85,6 +85,57 @@ rain peaks. The benchmark reports model-to-observed peak rain ratios for
 the cyclone and heavy-rain proxies. Larger leads use the array's own fitted
 row.
 
+## Build the extended training archive
+
+Run this in a training environment with the organizer kit installed. Keep
+the organizer's original NetCDF as the benchmark input. The extended
+archive adds the earlier WeatherBench2 rows and preserves the organizer
+fields and static grid.
+
+```sh
+python -m pip install -r requirements-train.txt
+python -m pip install 'zarr>=3' gcsfs
+ORGANIZER_NC=/path/to/india_climate_train.nc
+EXTENDED_NC=data/r1/india_climate_1979_2021.nc
+BUILD_DIR="$(mktemp -d)"
+mkdir -p "$(dirname "$EXTENDED_NC")"
+
+python -m monsoon_r1.build_dataset train \
+  --start 1979-01-01 --end 2004-12-31 --out "$BUILD_DIR/history.npz"
+python - "$ORGANIZER_NC" "$BUILD_DIR/organizer.npz" <<'PY'
+from pathlib import Path
+import sys
+import numpy as np
+from model.unet import LAT, LON
+from train.common import load_weather
+
+source = load_weather(Path(sys.argv[1]))
+dates = np.char.replace(source.dates.astype(str), "-", "").astype(int)
+np.savez_compressed(sys.argv[2], data=source.physical, dates=dates, lat=LAT, lon=LON)
+PY
+python -m monsoon_r1.build_dataset merge \
+  --parts "$BUILD_DIR/history.npz" "$BUILD_DIR/organizer.npz" --out "$BUILD_DIR/extended.npz"
+python - "$ORGANIZER_NC" "$BUILD_DIR/extended.npz" "$EXTENDED_NC" <<'PY'
+from pathlib import Path
+import sys
+import numpy as np
+from monsoon_r1.build_dataset import export_nc
+from train.common import load_weather
+
+source = load_weather(Path(sys.argv[1]))
+output = Path(sys.argv[3])
+export_nc(Path(sys.argv[2]), output, static=source.static)
+extended = load_weather(output)
+np.testing.assert_array_equal(extended.static, source.static)
+np.testing.assert_array_equal(extended.dates[-len(source.dates):], source.dates)
+np.testing.assert_array_equal(extended.physical[-len(source.dates):], source.physical)
+print(output, extended.dates[0], extended.dates[-1], extended.physical.shape)
+PY
+```
+
+The commands above describe the extended input. The submission checkpoint
+documented below is the existing organizer-archive fit.
+
 ## Reproduce the shipped checkpoint
 
 The retained 15-epoch checkpoint was trained on the organizer archive with SHA-256
