@@ -215,3 +215,134 @@ msl mean 101122.321925 std 619.019240
 tcwv mean 30.033538 std 20.494364
 Extended load_weather BLOCKED (FileNotFoundError): data\r1\india_climate_1979_2021.nc
 ```
+
+## Step 3 — Add deterministic trainer controls
+
+Added inclusive climatology years, optional recent-year sampling, buffered
+validation folds, a curriculum epoch cap, and per-epoch JSON loss logs. The
+trainer uses a fixed clean validation horizon for checkpoint selection and
+stops after three consecutive non-improvements. Training window eligibility
+comes from the dataset time axis and the selected split. The trainer accepts
+one fold per invocation. The smoke runs used CPU and a scratch copy of rows
+from the provided archive.
+
+### Smoke command
+
+```powershell
+$env:OMP_NUM_THREADS='4'
+$env:MKL_NUM_THREADS='4'
+@'
+from pathlib import Path
+import json
+import subprocess
+import sys
+
+import numpy as np
+import torch
+import xarray as xr
+from engine.engine import Engine
+from monsoon_r1 import scoring
+from train.common import FOLD_BUFFER_DAYS, day_phase, load_weather, time_block_split, window_ends
+from train.train import training_order
+
+archive = Path("tests/_windows/india_climate_train.nc")
+root = Path("tests/_windows/trainer-smoke")
+root.mkdir(exist_ok=True)
+fixture = root / "fixture.nc"
+with xr.open_dataset(archive) as source:
+    days = source.time.values.astype("datetime64[D]")
+    boundary = np.flatnonzero(days.astype("datetime64[Y]")[1:] != days.astype("datetime64[Y]")[:-1])[0] + 1
+    source.isel(time=slice(boundary - 100, boundary + 100)).to_netcdf(fixture)
+weather = load_weather(fixture)
+assert weather.physical.shape == (200, 6, 32, 36)
+first_year = str(weather.dates[0].astype("datetime64[Y]"))
+last_year = str(weather.dates[-1].astype("datetime64[Y]"))
+base = [sys.executable, "-B", "-m", "train.train", str(fixture),
+        "--device", "cpu", "--width", "4", "--threads", "4", "--batch-size", "32"]
+validation = ["--split", "train", "--val-years", "1"]
+opts = ["--seed", "35", "--clim-years", first_year, first_year, "--sample-weight-recent"]
+
+def run(name, flags):
+    path = root / name / "airavat.pt"
+    command = [*base, "--output", str(path), *flags]
+    print(subprocess.list2cmdline(command), flush=True)
+    subprocess.run(command, check=True)
+    history = json.loads(path.with_suffix(".loss.json").read_text())
+    package = torch.load(path, map_location="cpu", weights_only=True)
+    assert history["checkpoint_epoch"] == package["epochs"]
+    model = Engine(path.parent)
+    result = model.simulate(weather.physical[:3], day_phase(weather.day_of_year[2]), 2)
+    assert not scoring.validity(result, 2)
+    return history, package, path
+
+old, _, old_path = run("legacy", [*validation, "--curriculum", "1"])
+a, package, first_path = run("a", [*validation, *opts, "--curriculum", "1,2,2", "--max-epochs", "2"])
+b, _, second_path = run("b", [*validation, *opts, "--curriculum", "1,2,2", "--max-epochs", "2"])
+assert a == b and len(a["epochs"]) == 2
+assert package["clim_years"] == [int(first_year)] * 2
+assert torch.equal(torch.load(first_path, weights_only=True)["model"]["input.weight"],
+                   torch.load(second_path, weights_only=True)["model"]["input.weight"])
+assert old["epochs"][0]["val_loss"] is not None
+
+all_years, all_pkg, all_path = run("all", ["--split", "all", *opts, "--curriculum", "1"])
+assert all_years["epochs"][0]["val_loss"] is None
+assert all_pkg["fit_period"][-1].startswith(last_year)
+assert all_pkg["climatology_fit_periods"][0][-1].startswith(first_year)
+seasons = weather.dates.astype("datetime64[Y]")
+pool = np.arange(2, 199)
+order = training_order(pool, seasons, np.random.default_rng(35), True)
+assert len(order) == len(pool) and np.count_nonzero(seasons[order] == seasons[-1]) > 110
+
+stop, stopped_pkg, _ = run("stop", [*validation, "--seed", "35", "--learning-rate", "1e-40",
+                                   "--curriculum", "1,1,1,1,1"])
+assert stop["stopped_early"] and len(stop["epochs"]) == 4 and stopped_pkg["epochs"] == 1
+for start, end in ((2008, 2009), (2014, 2015), (2020, 2021)):
+    train, val = time_block_split(days, start, end)
+    assert str(days[val.start]) == f"{start}-01-01" and str(days[val.stop - 1]) == f"{end}-12-31"
+    for span in train:
+        windows = window_ends(span.stop - span.start, 14, "all") + span.start
+        assert all((windows + 14 < val.start - FOLD_BUFFER_DAYS) |
+                   (windows - 2 >= val.stop + FOLD_BUFFER_DAYS))
+    print("fold", start, end, "train spans", [(p.start, p.stop) for p in train], "val", (val.start, val.stop))
+print("200-day smoke PASS", "epoch1_train_loss", a["epochs"][0]["train_loss"],
+      "epoch1_val_loss", a["epochs"][0]["val_loss"], "early_stop_epoch", len(stop["epochs"]),
+      "legacy_and_new_checkpoints_engine_load_and_validity PASS", "same_seed_loss_logs_identical PASS")
+
+resume, resume_pkg, _ = run("resume", [*validation, "--curriculum", "1", "--resume", str(old_path)])
+assert resume["epochs"][0]["epoch"] == resume_pkg["epochs"] == 2
+fold_year = str(np.unique(days.astype("datetime64[Y]"))[1])
+fold_start, fold_stop = np.searchsorted(days, np.array([fold_year, str(int(fold_year) + 1)], dtype="datetime64[Y]"))
+fold_file = root / "fold-fixture.nc"
+with xr.open_dataset(archive) as source:
+    source.isel(time=slice(fold_start - 28, fold_stop + 28)).to_netcdf(fold_file)
+fold_path = root / "fold" / "airavat.pt"
+fold_cli = [*base[:4], str(fold_file), *base[5:], "--folds", fold_year, fold_year,
+            "--curriculum", "1", "--output", str(fold_path)]
+print(subprocess.list2cmdline(fold_cli), flush=True)
+subprocess.run(fold_cli, check=True)
+fold_pkg = torch.load(fold_path, map_location="cpu", weights_only=True)
+assert fold_pkg["split"] == "fold" and len(fold_pkg["fit_periods"]) == 2
+assert fold_pkg["validation_period"] == [f"{fold_year}-01-01", f"{fold_year}-12-31"]
+assert json.loads(fold_path.with_suffix(".loss.json").read_text())["epochs"][0]["val_loss"] is not None
+fold_engine = Engine(fold_path.parent)
+assert not scoring.validity(fold_engine.simulate(weather.physical[:3], day_phase(weather.day_of_year[2]), 2), 2)
+print("legacy resume PASS", "buffered fold CLI and engine load PASS")
+'@ | & .venv/Scripts/python.exe -B -
+```
+
+### Smoke output
+
+```text
+Early stopping after 3 epochs without validation improvement
+fold 2008 2009 train spans [(0, 1081), (1840, 6209)] val (1095, 1826)
+fold 2014 2015 train spans [(0, 3273), (4031, 6209)] val (3287, 4017)
+fold 2020 2021 train spans [(0, 5464)] val (5478, 6209)
+200-day smoke PASS epoch1_train_loss 0.6302236969937983 epoch1_val_loss 7985.680989583333 early_stop_epoch 4 legacy_and_new_checkpoints_engine_load_and_validity PASS same_seed_loss_logs_identical PASS
+legacy resume PASS buffered fold CLI and engine load PASS
+```
+
+The plateau smoke run kept epoch 1. The all-years run trained into the
+fixture's second year and fit climatology and scale on the first year. The
+short partial-season fixtures exercise trainer behavior. Their losses are
+smoke diagnostics. The shipped checkpoint retained SHA-256
+`30143677fb684a5e3daa92efcc7042de174d63c2ad07d7d509da9b258899796d`.

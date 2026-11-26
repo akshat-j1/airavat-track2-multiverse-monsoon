@@ -1,7 +1,9 @@
 """Train the Track 2 autoregressive model and write an inference checkpoint."""
 
 import argparse
+import json
 import math
+import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 import time
@@ -13,11 +15,12 @@ from torch.nn import functional as F
 from model.unet import CHANNELS, LAT, RAIN, AnomalyUNet, encode_physical, forecast_step, static_features
 from train.common import (
     DEFAULT_VAL_YEARS, PERIOD, day_phase, fit_climatology, load_weather,
-    seasonal_fields, validation_start, window_ends,
+    seasonal_fields, time_block_split, validation_start, window_ends,
 )
 
 DEFAULT_CURRICULUM = "1,1,1,2,2,3,4,4,6,8,8"
 DEFAULT_FAR_FIELD_WEIGHT = 18.0
+EARLY_STOP_PATIENCE = 3
 PRESSURE = CHANNELS.index("msl")
 
 
@@ -115,7 +118,6 @@ def rollout_loss(model, weather, doy, phase, climate, ends, horizon, scale, feat
 
 
 def save_checkpoint(path, model, coefficients, scale, raw_static, width, epochs, fit_metadata):
-    path.parent.mkdir(parents=True, exist_ok=True)
     package = {
         "format_version": 1,
         "model_name": "airavat-anomaly-unet",
@@ -127,13 +129,41 @@ def save_checkpoint(path, model, coefficients, scale, raw_static, width, epochs,
         "epochs": epochs,
         **fit_metadata,
     }
+    write_atomically(path, lambda pending: torch.save(package, pending))
+
+
+def write_atomically(path, write):
+    path.parent.mkdir(parents=True, exist_ok=True)
     with NamedTemporaryFile(dir=path.parent, suffix=".tmp", delete=False) as file:
         pending = Path(file.name)
     try:
-        torch.save(package, pending)
+        write(pending)
         pending.replace(path)
     finally:
         pending.unlink(missing_ok=True)
+
+
+def training_order(ends, years, rng, weight_recent):
+    if not weight_recent or years[ends[-1]] == years[ends[0]]:
+        return rng.permutation(ends)
+    age = years[ends] - years[ends[0]]
+    weights = 1 + age / age[-1]
+    return rng.choice(ends, size=len(ends), replace=True, p=weights / weights.sum())
+
+
+def climatology_partitions(parts, years, clim_years):
+    if clim_years is None:
+        return parts
+    first, last = clim_years
+    if not 1 <= first <= last <= 9998:
+        raise ValueError("--clim-years requires ordered calendar years between 1 and 9998")
+    bounds = [np.datetime64(f"{year:04d}", "Y") for year in (first, last + 1)]
+    left, right = map(int, np.searchsorted(years, bounds))
+    selected = tuple(slice(max(left, part.start), min(right, part.stop)) for part in parts
+                     if max(left, part.start) < min(right, part.stop))
+    if not selected:
+        raise ValueError("--clim-years contains no eligible training records")
+    return selected
 
 
 def main():
@@ -143,6 +173,13 @@ def main():
     parser.add_argument("--split", choices=("train", "all"), default="train")
     parser.add_argument("--val-years", type=int, default=DEFAULT_VAL_YEARS,
                         help="Latest calendar years to hold out with --split train")
+    parser.add_argument("--clim-years", nargs=2, type=int, metavar=("START", "END"),
+                        help="Fit climatology and scale on eligible training records in this inclusive range")
+    parser.add_argument("--folds", nargs=2, type=int, metavar=("START", "END"),
+                        help="Use one calendar-year validation block with a 14-day buffer on each side")
+    parser.add_argument("--sample-weight-recent", action="store_true",
+                        help="Sample with replacement, with calendar-year weights rising from 1 to 2")
+    parser.add_argument("--max-epochs", type=int, help="Cap the number of epochs in the supplied curriculum")
     parser.add_argument("--curriculum", default=DEFAULT_CURRICULUM, help="Comma-separated rollout lengths, one per epoch")
     parser.add_argument("--batch-size", type=int, default=48)
     parser.add_argument("--width", type=int, default=16)
@@ -162,50 +199,95 @@ def main():
         parser.error("--curriculum must be a comma-separated list of integers")
     if min(horizons) < 1 or max(horizons) > 14 or args.width < 4 or args.width % 4:
         parser.error("Rollout lengths must be 1–14 and width must be a positive multiple of four")
-    if args.batch_size < 1 or args.threads < 1 or args.learning_rate <= 0:
+    if args.batch_size < 1 or args.threads < 1 or not math.isfinite(args.learning_rate) or args.learning_rate <= 0:
         parser.error("Batch size, thread count, and learning rate must be positive")
     if args.val_years < 1 or not math.isfinite(args.far_field_weight) or args.far_field_weight < 0:
         parser.error("Validation years must be positive and far-field weight must be finite and nonnegative")
     if not math.isfinite(args.event_rain_weight) or args.event_rain_weight < 0:
         parser.error("Event rain weight must be finite and nonnegative")
+    if args.max_epochs is not None:
+        if args.max_epochs < 1:
+            parser.error("--max-epochs must be positive")
+        horizons = horizons[:args.max_epochs]
+    if args.folds is not None and args.split == "all":
+        parser.error("--folds requires a held-out split")
+    if not 0 <= args.seed < 2**64:
+        parser.error("--seed must be an unsigned 64-bit integer")
 
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     torch.set_num_threads(args.threads)
-    torch.manual_seed(args.seed)
-    rng = np.random.default_rng(args.seed)
     device = args.device
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     device = torch.device(device)
+    torch.use_deterministic_algorithms(True, warn_only=device.type == "mps")
+    torch.manual_seed(args.seed)
+    rng = np.random.default_rng(args.seed)
 
     data = load_weather(args.dataset)
+    record_count = len(data.dates)
+    years = data.dates.astype("datetime64[Y]")
     try:
-        val_start = validation_start(data.dates, args.val_years) if args.split == "train" else None
+        if args.folds is not None:
+            train_parts, validation = time_block_split(data.dates, *args.folds)
+        elif args.split == "train":
+            val_start = validation_start(data.dates, args.val_years)
+            train_parts, validation = (slice(0, val_start),), slice(val_start, record_count)
+        else:
+            train_parts, validation = (slice(0, record_count),), None
+        climate_parts = climatology_partitions(train_parts, years, args.clim_years)
     except ValueError as exc:
         parser.error(str(exc))
-    fit_rows = slice(None, val_start)
-    fit_dates = data.dates[fit_rows]
+    if not train_parts:
+        parser.error("No training records remain outside the validation fold and buffer")
+
+    def period(part):
+        return [str(data.dates[part.start]), str(data.dates[part.stop - 1])]
+
+    fit_periods = [period(part) for part in train_parts]
     fit_metadata = {
-        "split": args.split,
-        "val_years": args.val_years if val_start is not None else None,
-        "fit_period": [str(fit_dates[0]), str(fit_dates[-1])],
+        "split": "fold" if args.folds is not None else args.split,
+        "val_years": args.val_years if validation is not None and args.folds is None else None,
+        "fit_period": [fit_periods[0][0], fit_periods[-1][-1]],
+        "fit_periods": fit_periods,
+        "validation_period": period(validation) if validation is not None else None,
+        "clim_years": args.clim_years,
+        "climatology_fit_periods": [period(part) for part in climate_parts],
+        "sample_weight_recent": args.sample_weight_recent,
         "far_field_weight": args.far_field_weight,
         "event_rain_weight": args.event_rain_weight,
         "seed": args.seed,
         "curriculum": horizons,
         "learning_rate": args.learning_rate,
     }
-    windows = {steps: window_ends(len(data.dates), steps, args.split, val_start=val_start)
-               for steps in set(horizons)}
+    windows = {
+        steps: np.concatenate([window_ends(part.stop - part.start, steps, "all") + part.start
+                               for part in train_parts])
+        for steps in set(horizons)
+    }
     for steps, ends in windows.items():
         if not len(ends):
-            parser.error(f"No {steps}-day windows in split {args.split}")
+            parser.error(f"No complete {steps}-day training windows")
+    validation_horizon = max(horizons)
+    validation_batches = ()
+    if validation is not None:
+        validation_horizon = min(validation_horizon, validation.stop - validation.start - 3)
+        if validation_horizon < 1:
+            parser.error("The validation partition needs at least three input days and one target day")
+        validation_ends = window_ends(validation.stop - validation.start, validation_horizon, "all") + validation.start
+        validation_batches = torch.as_tensor(validation_ends, device=device).split(args.batch_size)
+
+    fit_rows = climate_parts[0] if len(climate_parts) == 1 else np.concatenate(
+        [np.arange(part.start, part.stop) for part in climate_parts]
+    )
     encoded = encode_physical(torch.from_numpy(data.physical)).numpy()
-    coefficients = fit_climatology(encoded[fit_rows], data.day_of_year[fit_rows])
-    climatology_np = seasonal_fields(coefficients)
     season_idx = data.day_of_year % PERIOD
-    residual = encoded[fit_rows] - climatology_np[season_idx[fit_rows]]
+    climate_fields = encoded[fit_rows]
+    coefficients = fit_climatology(climate_fields, data.day_of_year[fit_rows])
+    climatology_np = seasonal_fields(coefficients)
+    residual = climate_fields - climatology_np[season_idx[fit_rows]]
     scale_np = np.maximum(residual.std(axis=(0, 2, 3)), 1e-4)
-    del residual
+    del climate_fields, residual
 
     weather = torch.as_tensor(encoded, device=device)
     day_idx = torch.as_tensor(season_idx, dtype=torch.long, device=device)
@@ -220,21 +302,27 @@ def main():
     completed_epochs = 0
     if args.resume:
         package = torch.load(args.resume, map_location="cpu", weights_only=True)
-        if package["split"] != args.split or package["width"] != args.width:
+        if package["split"] != fit_metadata["split"] or package["width"] != args.width:
             parser.error("--resume requires the same training split and model width")
+        if args.folds is not None and package.get("validation_period") != fit_metadata["validation_period"]:
+            parser.error("--resume requires the same validation fold")
         if not np.array_equal(package["climatology"].numpy(), coefficients):
             parser.error("--resume requires the same dataset and fitted climatology")
         model.load_state_dict(package["model"])
         completed_epochs = package["epochs"]
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.0001)
-    print(f"Device={device}, fit={fit_metadata['fit_period']}, split={args.split}, "
+    loss_path = args.output.with_suffix(".loss.json")
+    history = {"checkpoint_epoch": None, "stopped_early": False, "epochs": []}
+    best_loss, stale_epochs = math.inf, 0
+    print(f"Device={device}, fit={fit_metadata['fit_period']}, split={fit_metadata['split']}, "
           f"rollout curriculum={horizons}, far-field weight={args.far_field_weight:g}", flush=True)
     for epoch, horizon in enumerate(horizons, start=1):
         start = time.monotonic()
-        ends = rng.permutation(windows[horizon])
+        model.train()
+        ends = training_order(windows[horizon], years, rng, args.sample_weight_recent)
+        batches = torch.as_tensor(ends, device=device).split(args.batch_size)
         loss_total = torch.zeros((), device=device)
-        for offset in range(0, len(ends), args.batch_size):
-            batch = torch.as_tensor(ends[offset:offset + args.batch_size], device=device)
+        for batch in batches:
             optimizer.zero_grad(set_to_none=True)
             loss = rollout_loss(model, weather, day_idx, phase, climate, batch, horizon,
                                 scale, features, latitude_weight, augment=epoch > 1 or args.resume is not None,
@@ -246,9 +334,41 @@ def main():
         average = float(loss_total.cpu()) / len(ends)
         if not np.isfinite(average):
             raise RuntimeError("Non-finite training loss")
-        save_checkpoint(args.output, model, coefficients, scale, data.static, args.width,
-                        completed_epochs + epoch, fit_metadata)
-        print(f"Epoch {epoch:02d} lead={horizon} loss={average:.4f} seconds={time.monotonic() - start:.1f}", flush=True)
+        val_loss = None
+        if validation_batches:
+            model.eval()
+            with torch.inference_mode():
+                val_total = torch.zeros((), device=device)
+                for batch in validation_batches:
+                    loss = rollout_loss(model, weather, day_idx, phase, climate, batch, validation_horizon,
+                                        scale, features, latitude_weight, augment=False,
+                                        far_field_weight=args.far_field_weight, event_rain_weight=args.event_rain_weight)
+                    val_total += loss * len(batch)
+                val_loss = float(val_total.cpu()) / len(validation_ends)
+            if not math.isfinite(val_loss):
+                raise RuntimeError("Non-finite validation loss")
+        current_epoch = completed_epochs + epoch
+        if val_loss is None or val_loss < best_loss:
+            save_checkpoint(args.output, model, coefficients, scale, data.static, args.width, current_epoch, fit_metadata)
+            history["checkpoint_epoch"] = current_epoch
+            if val_loss is not None:
+                best_loss = val_loss
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
+        history["stopped_early"] = stale_epochs >= EARLY_STOP_PATIENCE and epoch < len(horizons)
+        history["epochs"].append({"epoch": current_epoch, "train_horizon": horizon, "train_loss": average,
+                                  "validation_horizon": validation_horizon if validation_batches else None,
+                                  "val_loss": val_loss})
+        write_atomically(loss_path, lambda pending: pending.write_text(
+            json.dumps(history, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+        ))
+        validation_text = f" val_loss={val_loss:.4f}" if val_loss is not None else ""
+        print(f"Epoch {epoch:02d} lead={horizon} loss={average:.4f}{validation_text} "
+              f"seconds={time.monotonic() - start:.1f}", flush=True)
+        if history["stopped_early"]:
+            print(f"Early stopping after {stale_epochs} epochs without validation improvement", flush=True)
+            break
         if epoch + 2 == len(horizons) and len(horizons) > 3:
             for group in optimizer.param_groups:
                 group["lr"] *= 0.5

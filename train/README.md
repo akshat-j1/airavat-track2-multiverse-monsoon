@@ -12,6 +12,33 @@ python -m train.train /path/to/india_climate_train.nc --split all --output weigh
 
 `--val-years 2` reserves the last two calendar years represented in the dataset. This includes a partial final year if one is present. Every forecast window stays within its partition. `--split all` fits on the entire time axis for deployment. To run the optional shock diagnostics in `tests.eval_skill`, install the official kit wheel and supply its `stats.json`.
 
+Use `--clim-years START END` to set the inclusive calendar-year range for
+climatology and anomaly scale. The network still trains on every eligible
+training year. With a validation split, both fits exclude validation and
+buffer days. With multiple years in the window pool, `--sample-weight-recent`
+keeps the epoch size fixed and samples with replacement. Per-window weights
+rise linearly from 1 in the earliest year to 2 in the latest, using the year of
+the last input day.
+
+Pass `--folds START END` in place of `--val-years` and use a separate
+checkpoint path for each run. The three audit folds are:
+
+```sh
+python -m train.train "$DATA_NC" --folds 2008 2009 --output /tmp/fold-a/airavat.pt
+python -m train.train "$DATA_NC" --folds 2014 2015 --output /tmp/fold-b/airavat.pt
+python -m train.train "$DATA_NC" --folds 2020 2021 --output /tmp/fold-c/airavat.pt
+```
+
+Each fold holds out the full interval and removes 14 days of training data on
+either side where available. `--max-epochs` caps the supplied curriculum.
+Validation uses a fixed rollout horizon so epoch losses can be compared. With
+a holdout, the trainer saves the best checkpoint and stops after three epochs
+without improvement. With `--split all`, it saves the latest epoch and records
+null validation loss. The adjacent `airavat.loss.json` records the losses and
+the selected epoch. Use the same `--seed`, backend, thread count, and software
+versions for reproducible runs. MPS reports warnings for operations where
+PyTorch cannot guarantee determinism.
+
 ## Reproduce the shipped checkpoint
 
 The retained 15-epoch checkpoint was trained on the organizer archive with SHA-256
