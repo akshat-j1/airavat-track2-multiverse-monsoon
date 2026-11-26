@@ -69,12 +69,13 @@ def load_window(path):
     return {"init_states": init.tolist(), "doy_sincos": doy.tolist(), "steps": 10}, metadata
 
 
-def request(url, route, payload=None, raw=None):
+def request(url, route, payload=None, raw=None, content_type="application/json", extra_headers=None):
     """Return status, decoded body and complete wall latency, including JSON IO."""
     started = time.perf_counter()
     data = raw if raw is not None else (None if payload is None else json.dumps(payload).encode("utf-8"))
-    req = Request(url.rstrip("/") + route, data=data,
-                  headers={"Content-Type": "application/json"}, method="GET" if data is None else "POST")
+    headers = {"Content-Type": content_type, **(extra_headers or {})}
+    req = Request(url.rstrip("/") + route, data=data, headers=headers,
+                  method="GET" if data is None else "POST")
     try:
         response = urlopen(req, timeout=15)
     except HTTPError as exc:
@@ -142,18 +143,29 @@ def main():
     explicit_null = forecast(checks, args.url, dict(payload, perturbation=None), "null perturbation")
     checks.check("null vs omitted perturbation equal", baseline is not None and explicit_null is not None
                  and np.array_equal(baseline[0], explicit_null[0]))
+    for norm in (0.9, 1.1):
+        status, response, _ = request(args.url, "/simulate", dict(payload, doy_sincos=[norm, 0]))
+        checks.check(f"accept phase norm {norm}", status == 200 and "rollout" in response, f"status={status}")
 
     cases = [("non-object", []), ("missing fields", {}),
              ("missing init_states", {k: v for k, v in payload.items() if k != "init_states"}),
              ("missing doy_sincos", {k: v for k, v in payload.items() if k != "doy_sincos"})]
     for key, values in (
         ("init_states", [[], "bad", None, [[1], [2, 3]]]),
-        ("doy_sincos", [[], [0], [0, 1, 2], ["bad", 1], [float("inf"), 0], [0, 0]]),
+        ("doy_sincos", [[], [0], [0, 1, 2], ["bad", 1], ["0", 1], [float("inf"), 0], [0, 0], [1.11, 0]]),
         ("steps", [0, -1, 15, 31, 1.5, True, "10", None, float("nan"), float("inf")]),
         ("perturbation", [[], "bad", [[[0]]], {"bad": 1}]),
     ):
         for index, value in enumerate(values):
             cases.append((f"{key} invalid {index + 1} ({value!r})", dict(payload, **{key: value})))
+    init = np.asarray(payload["init_states"], dtype=object)
+    init[0, 0, 0, 0] = str(init[0, 0, 0, 0])
+    cases.append(("numeric string in weather grid", dict(payload, init_states=init.tolist())))
+    init[0, 0, 0, 0] = 1e38
+    cases.append(("temperature outside physical bounds", dict(payload, init_states=init.tolist())))
+    excessive_delta = np.zeros((6, 32, 36))
+    excessive_delta[4, 0, 0] = -1e10
+    cases.append(("perturbed pressure outside physical bounds", dict(payload, perturbation=excessive_delta.tolist())))
     for key, shape in (("init_states", (3, 6, 32, 36)), ("perturbation", (6, 32, 36))):
         for value in (float("nan"), float("inf")):
             invalid = np.zeros(shape)
@@ -170,6 +182,11 @@ def main():
         checks.check("bad input: malformed JSON", status in (400, 422), f"status={status}")
     except Exception as exc:
         checks.check("bad input: malformed JSON", False, str(exc))
+    status, _, _ = request(args.url, "/simulate", payload, content_type="text/plain")
+    checks.check("bad input: wrong media type", status == 415, f"status={status}")
+    status, _, _ = request(args.url, "/simulate", raw=b"",
+                           extra_headers={"Content-Length": str(8 * 1024 * 1024 + 1)})
+    checks.check("bad input: body exceeds 8 MiB", status == 413, f"status={status}")
     return int(checks.failed > 0)
 
 

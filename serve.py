@@ -5,11 +5,8 @@ Run:  python serve.py --port 8000
 API:  POST /health, POST /simulate  (see API_CONTRACT.md in yug-monsoon-kit)
 Also: GET /dashboard/  serves the static dashboard (code lives in dashboard/).
 
-The model lives behind the Engine interface (engine/engine.py, owned by Part A).
-If engine/engine.py is missing or fails to load, the server falls back to
-engine/stub_engine.py so it always answers with valid output; /health then reports
-a model_name containing "stub". Set MONSOON_STRICT=1 to disable the fallback
-(recommended while testing the real model).
+The trained checkpoint is required by default. MONSOON_DEV_STUB=1 permits the
+labelled development stub if the real engine cannot start.
 """
 import os
 import sys
@@ -22,6 +19,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/mpl")
 import argparse  # noqa: E402
 import base64  # noqa: E402
 import binascii  # noqa: E402
+import json  # noqa: E402
 import math  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
@@ -39,28 +37,28 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 ROOT = Path(__file__).resolve().parent
 N_IN, N_CH, H, W = 3, 6, 32, 36
 MAX_STEPS = 14  # official monsoon_r1.contract.MAX_STEPS; no kit needed at runtime
-STRICT = os.environ.get("MONSOON_STRICT") == "1"
+MAX_BODY_BYTES = 8 * 1024 * 1024
+PHASE_TOLERANCE = 1e-6
+INPUT_BOUNDS = (
+    ("t2m", 150, 350), ("tp", 0, 1000), ("u10", -100, 100),
+    ("v10", -100, 100), ("msl", 80000, 115000), ("tcwv", 0, 150),
+)
 
 
 def _log(msg):
     print("[serve] " + msg, file=sys.stderr, flush=True)
 
 
-# --------------------------------------------------------------------------- output safety
-def sanitize(out, last_day, steps):
-    """Return float32 [steps, 6, H, W]: right shape, finite, rain >= 0."""
-    r = np.array(out, dtype=np.float32, copy=True)
-    if r.ndim != 4 or r.shape[0] < steps or r.shape[1:] != (N_CH, H, W):
-        raise ValueError("engine returned shape %s, expected (%d, 6, 32, 36)" % (r.shape, steps))
-    r = r[:steps]
-    prev = np.asarray(last_day, dtype=np.float32)
-    for k in range(steps):
-        bad = ~np.isfinite(r[k])
-        if bad.any():
-            r[k][bad] = prev[bad]  # fill from the previous valid step
-        prev = r[k]
-    r[:, 1] = np.maximum(r[:, 1], 0.0)
-    return r
+def checked_rollout(out, steps):
+    rollout = np.asarray(out)
+    expected = (steps, N_CH, H, W)
+    if rollout.shape != expected:
+        raise ValueError(f"engine returned shape {rollout.shape}, expected {expected}")
+    if not np.issubdtype(rollout.dtype, np.floating) or not np.isfinite(rollout).all():
+        raise ValueError("engine returned non-finite or non-floating-point data")
+    if (rollout[:, 1] < 0).any():
+        raise ValueError("engine returned negative precipitation")
+    return rollout
 
 
 # --------------------------------------------------------------------------- engine loading
@@ -75,23 +73,27 @@ def _warmup(engine):
     x = np.empty((N_IN, N_CH, H, W), dtype=np.float32)
     x[:] = np.array([300.0, 1.0, 3.0, 0.0, 101000.0, 40.0], dtype=np.float32)[None, :, None, None]
     out = engine.simulate(x, np.array([0.0, -1.0], dtype=np.float32), 2, None)
-    sanitize(out, x[-1], 2)
+    checked_rollout(out, 2)
 
 
 def load_engine():
     try:
+        weights_dir = ROOT / "weights"
+        checkpoint = weights_dir / "airavat.pt"
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"Missing trained checkpoint: {checkpoint}")
+        with checkpoint.open("rb") as stream:
+            if stream.read(64).startswith(b"version https://git-lfs.github.com/spec/v1"):
+                raise ValueError(f"Expected the trained checkpoint at {checkpoint}, found a Git LFS pointer")
         from engine.engine import Engine
 
-        eng = Engine(str(ROOT / "weights"))
+        eng = Engine(str(weights_dir))
         _warmup(eng)
         return eng, str(getattr(eng, "model_name", "monsoon-engine")), False
-    except Exception as e:  # noqa: BLE001
-        if STRICT:
+    except Exception as exc:
+        if os.environ.get("MONSOON_DEV_STUB") != "1":
             raise
-        missing = isinstance(e, ModuleNotFoundError) and e.name in ("engine", "engine.engine")
-        if not missing:
-            traceback.print_exc()
-        _log("real engine unavailable (%s); using the STUB engine" % type(e).__name__)
+        _log(f"Development stub enabled after engine startup failed: {exc}")
         return _load_stub()
 
 
@@ -112,11 +114,21 @@ def _bad(msg):
     raise HTTPException(status_code=400, detail=msg)
 
 
+def _numeric_list(value, shape):
+    if not shape:
+        return type(value) in (int, float)
+    return isinstance(value, list) and len(value) == shape[0] and all(
+        _numeric_list(item, shape[1:]) for item in value
+    )
+
+
 def _array(value, shape, name):
     """Accept canonical lists and the official validator's optional base64 form."""
     try:
         if isinstance(value, dict):
-            if value.get("shape") != list(shape) or not isinstance(value.get("b64"), str):
+            dimensions = value.get("shape")
+            if (dimensions != list(shape) or any(type(dim) is not int for dim in dimensions)
+                    or not isinstance(value.get("b64"), str)):
                 _bad(f"{name} base64 object must have shape {list(shape)}")
             expected = math.prod(shape) * 4
             if len(value["b64"]) != 4 * ((expected + 2) // 3):
@@ -126,12 +138,21 @@ def _array(value, shape, name):
                 _bad(f"{name} base64 length does not match shape")
             result = np.frombuffer(raw, dtype="<f4").reshape(shape)
         else:
-            result = np.asarray(value, dtype=np.float32)
+            if not _numeric_list(value, shape):
+                _bad(f"{name} must be JSON numbers with shape {list(shape)}")
+            result = np.asarray(value, dtype=np.float64)
     except (ValueError, TypeError, OverflowError, binascii.Error):
         _bad(f"{name} must be numeric lists or a valid base64 array")
     if result.shape != shape or not np.isfinite(result).all():
         _bad(f"{name} must be finite with shape {list(shape)}")
     return result
+
+
+def _validate_state(state, name):
+    for channel, (variable, low, high) in enumerate(INPUT_BOUNDS):
+        values = state[..., channel, :, :]
+        if (values < low).any() or (values > high).any():
+            _bad(f"{name} {variable} must be between {low} and {high} in physical units")
 
 
 def parse_request(body):
@@ -140,9 +161,13 @@ def parse_request(body):
     if "init_states" not in body or "doy_sincos" not in body:
         _bad("init_states and doy_sincos are required")
     init = _array(body["init_states"], (N_IN, N_CH, H, W), "init_states")
+    _validate_state(init, "init_states")
     doy = _array(body["doy_sincos"], (2,), "doy_sincos")
-    if not 0.9 <= float(np.linalg.norm(doy)) <= 1.1:
+    norm = math.hypot(*doy)
+    if not 0.9 - PHASE_TOLERANCE <= norm <= 1.1 + PHASE_TOLERANCE:
         _bad("doy_sincos must describe a unit-circle angle")
+    # Normalize in full precision before handing the phase to the float32 Engine.
+    phase = (doy.astype(np.float64) / norm).astype(np.float32)
 
     steps = body.get("steps", 10)
     if isinstance(steps, bool) or not isinstance(steps, (int, float)):
@@ -156,7 +181,28 @@ def parse_request(body):
     pert = body.get("perturbation")
     if pert is not None:
         pert = _array(pert, (N_CH, H, W), "perturbation")
-    return init, doy, steps, pert
+        with np.errstate(over="ignore"):
+            _validate_state(init[-1].astype(np.float64) + pert, "perturbed last input")
+        pert = pert.astype(np.float32, copy=False)
+    return init.astype(np.float32, copy=False), phase, steps, pert
+
+
+async def _read_json(request):
+    media_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
+    if media_type != "application/json" and not (media_type.startswith("application/") and media_type.endswith("+json")):
+        raise HTTPException(status_code=415, detail="Content-Type must be application/json")
+    content_length = request.headers.get("content-length", "")
+    if content_length.isdecimal() and int(content_length) > MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="JSON request exceeds the 8 MiB limit")
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > MAX_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="JSON request exceeds the 8 MiB limit")
+        raw.extend(chunk)
+    try:
+        return json.loads(raw)
+    except (ValueError, RecursionError):
+        _bad("invalid JSON")
 
 
 # --------------------------------------------------------------------------- app
@@ -174,15 +220,10 @@ def _run(init, doy, steps, pert):
     try:
         with STATE.lock:
             raw = STATE.engine.simulate(init, doy, steps, pert)
-        rollout = sanitize(raw, init[-1], steps)
-    except Exception:  # noqa: BLE001
+        rollout = checked_rollout(raw, steps)
+    except Exception:
         traceback.print_exc()
-        if STRICT:
-            raise HTTPException(status_code=500, detail="engine failed (MONSOON_STRICT=1)")
-        _log("engine failed on this request; answering with the stub engine")
-        from engine.stub_engine import Engine as StubEngine
-
-        rollout = sanitize(StubEngine().simulate(init, doy, steps, pert), init[-1], steps)
+        raise HTTPException(status_code=500, detail="Forecast engine failed")
     ms = (time.perf_counter() - t0) * 1000.0
     return {
         "rollout": np.round(rollout.astype(np.float64), 4).tolist(),
@@ -192,10 +233,7 @@ def _run(init, doy, steps, pert):
 
 @app.post("/simulate")
 async def simulate(request: Request):
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001
-        _bad("invalid JSON")
+    body = await _read_json(request)
     init, doy, steps, pert = parse_request(body)
     return await run_in_threadpool(_run, init, doy, steps, pert)
 
