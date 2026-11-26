@@ -3,6 +3,7 @@
 
 Run from any directory: python tools/export_grid.py
 Override paths with --input FILE.nc --output FILE.json.
+Use --checkpoint weights/airavat.pt to export the bundled inference static fields.
 Non-spatial dimensions (for example time or level) use their first index.
 """
 
@@ -46,7 +47,14 @@ def export_grid(input_path, output_path):
                 missing.append("latitude coordinate")
             if lon is None:
                 missing.append("longitude coordinate")
-            missing.extend(name for name in ("land_sea_mask", "orography_m") if name not in dataset)
+            fields = {}
+            for name in ("land_sea_mask", "orography_m"):
+                if name in dataset:
+                    fields[name] = dataset[name]
+                elif "static" in dataset and "static_channel" in dataset.coords and name in dataset.static_channel.values:
+                    fields[name] = dataset["static"].sel(static_channel=name, drop=True)
+                else:
+                    missing.append(name)
             if missing:
                 raise ValueError("Missing: " + ", ".join(missing))
             if lat.ndim not in (1, 2) or lon.ndim != lat.ndim:
@@ -60,7 +68,7 @@ def export_grid(input_path, output_path):
                 lon = lon.transpose(*spatial_dims)
             result = {"lat": lat.values.tolist(), "lon": lon.values.tolist()}
             for name in ("land_sea_mask", "orography_m"):
-                field = dataset[name]
+                field = fields[name]
                 if not set(spatial_dims).issubset(field.dims):
                     raise ValueError(f"{name} must include spatial dimensions {spatial_dims}; got {field.dims}")
                 field = field.isel({dim: 0 for dim in field.dims if dim not in spatial_dims}, drop=True)
@@ -77,12 +85,37 @@ def export_grid(input_path, output_path):
     return 0
 
 
+def export_checkpoint(checkpoint_path, output_path):
+    """Export only the two contract-permitted static fields; no weather archive."""
+    import torch
+    import numpy as np
+
+    package = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    if "static" not in package:
+        print("Missing: static. Checkpoint keys: " + ", ".join(package), file=sys.stderr)
+        return 1
+    static = package["static"].detach().cpu().numpy()
+    if static.shape != (2, 32, 36) or not np.isfinite(static).all():
+        raise ValueError("checkpoint static must be finite [2,32,36], mask then orography")
+    grid = {"lat": np.arange(6.5, 38.5).tolist(), "lon": np.arange(65.5, 101.5).tolist(),
+            "land_sea_mask": static[0].tolist(), "orography_m": static[1].tolist()}
+    content = json.dumps(grid, allow_nan=False, separators=(",", ":"))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(content + "\n", encoding="utf-8")
+    print(f"Wrote {output_path} from checkpoint static fields")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, default=ROOT / "india_climate_train.nc")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--input", type=Path, default=ROOT / "india_climate_train.nc")
+    source.add_argument("--checkpoint", type=Path)
     parser.add_argument("--output", type=Path, default=ROOT / "dashboard" / "grid.json")
     args = parser.parse_args()
     try:
+        if args.checkpoint:
+            return export_checkpoint(args.checkpoint, args.output)
         return export_grid(args.input, args.output)
     except (OSError, ValueError, ImportError) as exc:
         print(f"Export failed: {exc}", file=sys.stderr)

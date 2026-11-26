@@ -1,0 +1,9 @@
+# Runtime packages available in the organizers' offline sandbox.
+# On Windows, install torch from https://download.pytorch.org/whl/cpu first.
+torch
+numpy
+scipy
+pandas
+xarray
+fastapi
+uvicorn
