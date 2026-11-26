@@ -110,7 +110,7 @@ python tools/export_grid.py --input C:\external-data\india_climate_train.nc
 Run these in a second activated PowerShell terminal while the trained server runs:
 
 ```powershell
-python -m monsoon_r1.schema_validator http://localhost:8000
+python -m monsoon_r1.schema_validator http://127.0.0.1:8000
 python tests/check_contract.py --url http://127.0.0.1:8000 --require-real
 python tests/check_shocks.py --url http://127.0.0.1:8000 --require-real
 node tests/check_impact.js
@@ -131,9 +131,7 @@ dependencies. The Python app checks use stdlib urllib and NumPy only; `--window`
 accepts `.npy`, `.npz`, and JSON windows. Without it, checks use a synthetic
 constant physical window on the contract grid, not a held-out skill evaluation.
 Scratch test inputs, logs, and downloaded kit files belong in ignored
-`tests/_windows/`. On this Windows machine `localhost` first attempts IPv6 and
-adds about two seconds before falling back to IPv4; the explicit IPv4 URL avoids
-that client overhead for latency measurements.
+`tests/_windows/`.
 
 ## Train and assess skill
 
