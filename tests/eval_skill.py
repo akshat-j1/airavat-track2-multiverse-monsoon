@@ -10,12 +10,12 @@ import torch
 
 from engine.engine import Engine
 from model.unet import CHANNELS, STATE_SHAPE
-from train.common import LEADS, day_phase, load_weather, window_ends
+from train.common import DEFAULT_VAL_YEARS, LEADS, day_phase, load_weather, validation_start, window_ends, year_range
 from train.eval_baselines import forecast_metrics, validation_cases
 
 
-def evaluate_forecasts(engine, weather, stride):
-    ends, target, persistence, climatology = validation_cases(weather, stride)
+def evaluate_forecasts(engine, weather, val_start, stride):
+    ends, target, persistence, climatology = validation_cases(weather, val_start, stride)
     histories = ends[:, None] + np.arange(-2, 1)
     phases = day_phase(weather.day_of_year[ends])
     predictions = []
@@ -36,14 +36,15 @@ def evaluate_forecasts(engine, weather, stride):
     climatology_rmse = np.asarray(scores["climatology"]["rmse"])
     ratios = prediction[:, -1].var(axis=(-2, -1)) / np.maximum(target[:, -1].var(axis=(-2, -1)), 1e-8)
     return {
-        "years": "2020–2021", "windows": len(ends), "lead_days": LEADS, "channels": CHANNELS, **scores,
+        "years": year_range(weather.dates[val_start:]),
+        "windows": len(ends), "lead_days": LEADS, "channels": CHANNELS, **scores,
         "mean_skill_vs_persistence": (1 - model_rmse / persistence_rmse).mean(axis=1).tolist(),
         "mean_skill_vs_best_reference": (1 - model_rmse / np.minimum(persistence_rmse, climatology_rmse)).mean(axis=1).tolist(),
         "day8_spatial_variance_ratio": ratios.mean(axis=0).tolist(),
     }
 
 
-def evaluate_shocks(engine, weather, stats_path, samples):
+def evaluate_shocks(engine, weather, stats_path, samples, val_start):
     from monsoon_r1 import contract, scoring
 
     with stats_path.open(encoding="utf-8") as file:
@@ -51,8 +52,10 @@ def evaluate_shocks(engine, weather, stats_path, samples):
     if tuple(stats["channels"]) != CHANNELS:
         raise ValueError("Unexpected stats.json channel order")
     std = np.asarray(stats["std"], dtype="f4")
-    ends = window_ends(weather.dates, contract.SCORE_STEPS, "validation")
-    ends = ends[np.linspace(0, len(ends) - 1, samples, dtype=int)]
+    ends = window_ends(len(weather.dates), contract.SCORE_STEPS, "validation", val_start=val_start)
+    if not len(ends):
+        raise ValueError("No complete shock windows in the validation period")
+    ends = ends[np.linspace(0, len(ends) - 1, min(samples, len(ends)), dtype=int)]
     zeros = np.zeros(STATE_SHAPE, dtype="f4")
     results = []
     boxes = {"warm_ocean": contract.BOX_BAY_OF_BENGAL, "monsoon_stall": contract.BOX_ARABIAN_SEA}
@@ -83,6 +86,7 @@ def main():
     parser.add_argument("dataset", type=Path)
     parser.add_argument("--weights", type=Path, default=Path("weights"))
     parser.add_argument("--stats", type=Path)
+    parser.add_argument("--val-years", type=int, default=DEFAULT_VAL_YEARS)
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--shock-samples", type=int, default=0)
     parser.add_argument("--shocks-only", action="store_true")
@@ -90,16 +94,25 @@ def main():
     if args.stride < 1 or args.shock_samples < 0 or (args.shocks_only and not args.shock_samples):
         parser.error("Use a positive stride and request shock samples with --shocks-only")
     weather = load_weather(args.dataset)
+    try:
+        val_start = validation_start(weather.dates, args.val_years)
+    except ValueError as exc:
+        parser.error(str(exc))
     engine = Engine(args.weights)
     result = {}
     if not args.shocks_only:
         checkpoint = torch.load(args.weights / "airavat.pt", map_location="cpu", weights_only=True)
         if checkpoint["split"] != "train":
-            parser.error("Use the 2005–2019 checkpoint for held-out forecast skill")
-        result["forecast"] = evaluate_forecasts(engine, weather, args.stride)
+            parser.error("Use a --split train checkpoint for held-out forecast skill")
+        fit_period = [str(weather.dates[0]), str(weather.dates[val_start - 1])]
+        if checkpoint.get("fit_period", fit_period) != fit_period:
+            parser.error("The checkpoint's fitting period does not match this dataset and --val-years")
+        if "fit_period" not in checkpoint and args.val_years != DEFAULT_VAL_YEARS:
+            parser.error("A checkpoint with split metadata is required to override --val-years")
+        result["forecast"] = evaluate_forecasts(engine, weather, val_start, args.stride)
     if args.shock_samples:
         stats = args.stats or args.dataset.with_name("stats.json")
-        result["shocks"] = evaluate_shocks(engine, weather, stats, args.shock_samples)
+        result["shocks"] = evaluate_shocks(engine, weather, stats, args.shock_samples, val_start)
     print(json.dumps(result, indent=2, allow_nan=False))
 
 
