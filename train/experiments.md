@@ -175,3 +175,43 @@ affinity=0x55 physical_cores=4
 
 `git check-attr filter -- weights/airavat.pt` returned
 `weights/airavat.pt: filter: unspecified`. No candidate weights were promoted.
+
+## Step 2 — Preflight the extended archive
+
+The supplied reference archive loaded successfully. The extended archive was
+absent from its requested path. The format, static-field equality, seam
+statistics, period statistics, and land warming trend for the extended archive
+are pending. This step changed only the experiment log.
+
+```powershell
+@'
+from pathlib import Path
+import numpy as np
+from model.unet import CHANNELS, RAIN
+from train.common import load_weather
+
+reference = load_weather(Path("tests/_windows/india_climate_train.nc"))
+print("Reference load_weather PASS", reference.physical.shape, reference.static.shape,
+      reference.dates[0], reference.dates[-1], "min_tp", reference.physical[:, RAIN].min())
+for i, name in enumerate(CHANNELS):
+    a = reference.physical[:,i]
+    print(name, "mean", f"{a.mean(dtype=np.float64):.6f}", "std", f"{a.std(dtype=np.float64):.6f}")
+target = Path("data/r1/india_climate_1979_2021.nc")
+try:
+    load_weather(target)
+except FileNotFoundError:
+    print(f"Extended load_weather BLOCKED (FileNotFoundError): {target}")
+    raise SystemExit(2)
+'@ | & .venv/Scripts/python.exe -B -
+```
+
+```text
+Reference load_weather PASS (6209, 6, 32, 36) (2, 32, 36) 2005-01-01 2021-12-31 min_tp 0.0
+t2m mean 292.356904 std 13.463642
+tp mean 3.618069 std 7.553341
+u10 mean 0.887652 std 2.898980
+v10 mean 0.191332 std 2.426953
+msl mean 101122.321925 std 619.019240
+tcwv mean 30.033538 std 20.494364
+Extended load_weather BLOCKED (FileNotFoundError): data\r1\india_climate_1979_2021.nc
+```
