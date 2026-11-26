@@ -139,6 +139,13 @@ Follow the training, dataset inspection, and held-out evaluation instructions in
 [train/README.md](train/README.md). Reproducing the shipped checkpoint requires the
 organizer's supplied 2005–2021 archive. Keep the training archive outside Git.
 
+The recipe is seed-sensitive on CPU. Two seeds differed by up to 0.2038 mm/day
+in day-8 precipitation RMSE and up to 0.1536 in day-8 variance ratio. Neither
+CPU checkpoint matched the shipped MPS checkpoint bit for bit, and the shipped
+checkpoint's metrics fall outside the observed two-seed range in 16 of 28
+comparisons. Results use weather data through 2019 and are in-sample for the
+shipped checkpoint. See [docs/cpu-repro/REPORT.md](docs/cpu-repro/REPORT.md).
+
 ## Build the submission brief
 
 Use ReportLab to combine `train/brief_page1.md` with `brief/page2.md` and its
