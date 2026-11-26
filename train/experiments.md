@@ -380,3 +380,37 @@ windows, and the archived score came from a different, train-only checkpoint.
 On the same shipped weights, the earlier evaluator's calendar-neighbor
 climatology gave 37.63/45 and −2.01%. The kit climatology alone moved that
 replay to 37.15/45 and −2.58%. The archived train-only weights were unavailable.
+
+## Step 5 — E1 and E2 preflight
+
+The extended archive is absent from the workspace. The original organizer
+archive is available for benchmarking. E1 and E2 have no training or benchmark
+results, and the conditional second-seed run is pending.
+
+```powershell
+Test-Path -LiteralPath data/r1/india_climate_1979_2021.nc
+Test-Path -LiteralPath tests/_windows/india_climate_train.nc
+```
+
+```text
+False
+True
+```
+
+The recipe specifies seed 42, width 16, and batches of 48. The first 11
+epochs use the documented Gaussian-augmentation stage and curriculum
+`1,1,1,2,2,3,4,4,6,8,8` at learning rate 0.002. The final four epochs use
+the compact augmentation stage with curriculum `1,2,3,4`, learning rate
+0.00035, and far-field weight 18. E1 and E2 require that fixed epoch budget.
+Both exclude the final two calendar years from fitting.
+
+E0 numbers below are from `tests/_windows/benchmark/benchmark-E0.json`.
+Its proxies overlap its training data. E1 and E2 will score those proxies as
+held-out cases. A comparison of E1 with E2 isolates the climatology span
+under the shared extended training dataset and seed.
+
+| Run | Climatology fit years | Forecast /45 | CSI skill | RMSE skill d1 / d4 / d8 | Propagation / locality / stability / exact zero | Cold 10-step engine |
+|---|---|---:|---:|---|---|---:|
+| E0 shipped | 2005–2021 | 37.15 | 10.29% | 26.79% / 2.36% / −2.58% | 19/20 / 20/20 / 20/20 / 10/10 | 39.3 ms |
+| E1 | 1979–2019 | — | — | — | — | — |
+| E2 | 2005–2019 | — | — | — | — | — |
