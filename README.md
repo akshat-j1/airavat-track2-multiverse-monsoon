@@ -138,7 +138,8 @@ that client overhead for latency measurements.
 ## Train and assess skill
 
 Follow the training, dataset inspection, and held-out evaluation instructions in
-[train/README.md](train/README.md). Keep the training archive outside Git.
+[train/README.md](train/README.md), including the commands to build the extended
+archive and reproduce the shipped checkpoint. Keep the training archive outside Git.
 
 ## Build the submission brief
 

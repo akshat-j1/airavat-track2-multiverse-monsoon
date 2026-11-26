@@ -10,11 +10,12 @@ from torch.nn import functional as F
 
 from model.transport import advance_adjustment, transport_response
 from model.unet import (
-    STATE_SHAPE, AnomalyUNet, advance_phase, climatology_at, decode_physical,
+    CHANNELS, STATE_SHAPE, AnomalyUNet, advance_phase, climatology_at, decode_physical,
     encode_physical, forecast_step, static_features,
 )
 
 CHECKPOINT_NAME = "airavat.pt"
+MEMBER_PATTERN = "airavat-member-*.pt"
 MAX_STEPS = 14
 ENCODED_BOUNDS = (
     (233.15, 333.15), (0, math.log1p(400)), (-100, 100), (-100, 100),
@@ -22,49 +23,99 @@ ENCODED_BOUNDS = (
 )
 
 
+def checkpoint_paths(weights):
+    path = Path(weights)
+    if path.is_dir():
+        return [path / CHECKPOINT_NAME, *sorted(path.glob(MEMBER_PATTERN))]
+    return [path]
+
+
 class Engine:
     def __init__(self, weights_dir: str):
-        path = Path(weights_dir) / CHECKPOINT_NAME
-        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-        if checkpoint["format_version"] != 1:
-            raise ValueError(f"Unsupported checkpoint format in {path}")
         if torch.get_num_threads() > 4:
             torch.set_num_threads(4)
-        self.model_name = checkpoint["model_name"]
-        self._model = AnomalyUNet(checkpoint["width"]).float()
-        self._model.load_state_dict(checkpoint["model"])
-        self._model.eval()
-        self._coefficients = checkpoint["climatology"].float()
-        self._scale = checkpoint["anomaly_scale"].float().view(1, 6, 1, 1)
-        self._features = static_features(checkpoint["static"].float())[None]
+        paths = checkpoint_paths(weights_dir)
+        self._models = []
+        primary = None
+        shared_tensors = ("climatology", "anomaly_scale", "static")
+        for path in paths:
+            checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+            if checkpoint["format_version"] != 1:
+                raise ValueError(f"Unsupported checkpoint format in {path}")
+            if primary is None:
+                primary = checkpoint
+            elif ("shrinkage_alpha" in checkpoint or any(
+                    not torch.equal(checkpoint[name], primary[name]) for name in shared_tensors)):
+                raise ValueError(f"Ensemble member {path} must share the primary climatology, scale and static fields "
+                                 "and leave shrinkage to the primary checkpoint")
+            model = AnomalyUNet(checkpoint["width"]).float()
+            model.load_state_dict(checkpoint["model"])
+            self._models.append(model.eval())
+        self.model_name = primary["model_name"]
+        self._coefficients = primary["climatology"].float()
+        self._scale = primary["anomaly_scale"].float().view(1, 6, 1, 1)
+        self._features = static_features(primary["static"].float())[None]
+        self._alpha = primary.get("shrinkage_alpha")
+        if self._alpha is not None:
+            alpha = self._alpha
+            if (not isinstance(alpha, torch.Tensor) or not alpha.is_floating_point()
+                    or alpha.shape != (MAX_STEPS, len(CHANNELS)) or not torch.isfinite(alpha).all()
+                    or (alpha < 0).any() or (alpha > 1).any()):
+                raise ValueError(f"shrinkage_alpha must be a finite {MAX_STEPS}×{len(CHANNELS)} tensor in [0, 1]")
+            self._alpha = alpha.float()[:, :, None, None]
         self._lower, self._upper = torch.tensor(ENCODED_BOUNDS, dtype=torch.float32).T.reshape(2, 1, 6, 1, 1)
 
     @torch.inference_mode()
     def _rollout(self, windows, phases, steps, perturbed=None):
         """Run an independent forecast for each window in a CPU batch."""
+        encoded, climate = self._encoded_forecast(windows, phases, steps, perturbed)
+        forecast = []
+        for day, output in enumerate(encoded):
+            if self._alpha is not None:
+                alpha = self._alpha[day]
+                seasonal = climate[:, day]
+                shrunk = seasonal + alpha * (output - seasonal)
+                output = torch.where(alpha == 1, output, shrunk).clamp(self._lower, self._upper)
+            forecast.append(decode_physical(output, lead=day + 1))
+        return torch.stack(forecast, dim=1)
+
+    @torch.inference_mode()
+    def _encoded_forecast(self, windows, phases, steps, perturbed=None):
         encoded = encode_physical(windows)
         initial_phases = torch.stack([advance_phase(phases, day) for day in (-2, -1, 0)], dim=1)
         initial_climatology = climatology_at(self._coefficients, initial_phases)
+        branch = encode_physical(perturbed) if perturbed is not None else None
+        future = torch.stack([advance_phase(phases, day) for day in range(1, steps + 1)], dim=1)
+        climate = climatology_at(self._coefficients, future)
+        members = [self._member_rollout(model, encoded, initial_climatology, future, climate, branch)
+                   for model in self._models]
+        if len(members) == 1:
+            return members[0], climate
+        outputs = []
+        for day, states in enumerate(zip(*members)):
+            seasonal = climate[:, day]
+            anomaly = torch.stack([state - seasonal for state in states]).mean(dim=0)
+            outputs.append((seasonal + anomaly).clamp(self._lower, self._upper))
+        return outputs, climate
+
+    def _member_rollout(self, model, encoded, initial_climatology, future, climate, branch_encoded):
         history = (encoded - initial_climatology) / self._scale
-        if perturbed is not None:
-            branch_encoded = encode_physical(perturbed)
+        if branch_encoded is not None:
             branch_history = (branch_encoded - initial_climatology) / self._scale
             previous = encoded[:, -1]
             response = branch_encoded[:, -1] - previous
             support = response.ne(0).any(dim=1, keepdim=True).to(response.dtype)
             adjustment = response[:, 2:5]
             tendency = torch.zeros_like(adjustment)
-        future = torch.stack([advance_phase(phases, day) for day in range(1, steps + 1)], dim=1)
-        climate = climatology_at(self._coefficients, future)
         forecast = []
-        for day in range(steps):
+        for day in range(future.shape[1]):
             phase, seasonal = future[:, day], climate[:, day]
-            history, encoded = forecast_step(self._model, history, phase, seasonal, self._scale, self._features)
+            history, encoded = forecast_step(model, history, phase, seasonal, self._scale, self._features)
             reference = encoded.clamp(self._lower, self._upper)
             output = reference
-            if perturbed is not None:
+            if branch_encoded is not None:
                 branch_history, candidate = forecast_step(
-                    self._model, branch_history, phase, seasonal, self._scale, self._features,
+                    model, branch_history, phase, seasonal, self._scale, self._features,
                 )
                 wind = 0.5 * (previous[:, 2:4] + reference[:, 2:4])
                 transported = transport_response(response, wind)
@@ -79,8 +130,8 @@ class Engine:
                 branch_history[:, -1] = (output - seasonal) / self._scale
                 response = output - reference
                 previous = reference
-            forecast.append(decode_physical(output, lead=day + 1))
-        return torch.stack(forecast, dim=1)
+            forecast.append(output)
+        return forecast
 
     def _apply_response(self, reference, shift):
         """Compress extreme changes smoothly near a physical bound."""

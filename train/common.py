@@ -12,6 +12,8 @@ DEFAULT_VAL_YEARS = 2
 LEADS = (1, 4, 8)
 PERIOD = 365
 HARMONICS = 3
+FOLD_BUFFER_DAYS = 14
+PROXY_ROLLOUT_STEPS = 14
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,40 @@ def validation_start(dates, val_years=DEFAULT_VAL_YEARS):
     if cut == 0:
         raise ValueError("--val-years must leave at least one calendar year for training")
     return cut
+
+
+def time_block_split(dates, start_year, end_year):
+    """Return training slices and one full calendar-year validation block."""
+    if not 1 <= start_year <= end_year <= 9998:
+        raise ValueError("Fold years must be ordered and between 1 and 9998")
+    first = np.datetime64(f"{start_year:04d}", "Y").astype("datetime64[D]")
+    following = np.datetime64(f"{end_year + 1:04d}", "Y").astype("datetime64[D]")
+    if dates[0] > first or dates[-1] < following - np.timedelta64(1, "D"):
+        raise ValueError("The dataset must cover the entire requested fold")
+
+    start, stop = map(int, np.searchsorted(dates, [first, following]))
+    train_stop = max(0, start - FOLD_BUFFER_DAYS)
+    train_start = min(len(dates), stop + FOLD_BUFFER_DAYS)
+    train = tuple(part for part in (slice(0, train_stop), slice(train_start, len(dates)))
+                  if part.start < part.stop)
+    return train, slice(start, stop)
+
+
+def recorded_proxy_cases(audit):
+    """Return the original event selections in benchmark order."""
+    return list(dict.fromkeys((row["event"], row["first_target"]) for row in audit["event_forecast"]["events"]))
+
+
+def exclude_proxy_windows(dates, ends, steps, first_targets):
+    """Discard loss windows sharing any input or forecast row with a proxy."""
+    targets = np.asarray(first_targets, dtype="datetime64[D]")
+    positions = np.searchsorted(dates, targets)
+    in_range = positions < len(dates)
+    positions = positions[in_range]
+    positions = positions[dates[positions] == targets[in_range]]
+    overlap = ((ends[:, None] - 2 <= positions + PROXY_ROLLOUT_STEPS - 1)
+               & (ends[:, None] + steps >= positions - 3))
+    return ends[~overlap.any(axis=1)]
 
 
 def year_range(dates):

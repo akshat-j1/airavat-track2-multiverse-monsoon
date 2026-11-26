@@ -957,5 +957,206 @@
       }
     ],
     "checkpoint_decision": "Kept the existing binary because the retrained rain candidates lost event forecast skill."
+  },
+  "submission_experiments": {
+    "status": "blocked",
+    "required_archive": "data/r1/india_climate_1979_2021.nc",
+    "winning_configuration": null,
+    "full_archive_retraining": "not_run",
+    "extended_data_comparison": {
+      "E1": "not_run",
+      "E2": "not_run"
+    },
+    "capacity_sweep": "no trained candidates",
+    "evaluation_environment": {
+      "python": "3.14.10",
+      "torch": "2.15.0+cpu",
+      "numpy": "2.5.5",
+      "xarray": "2026.9.0",
+      "netCDF4": "1.7.5.1.post1",
+      "monsoon-r1-kit": "1.0.0"
+    },
+    "command_log": "train/experiments.md",
+    "held_out_diagnostics": [
+      {
+        "label": "CPU-train-only",
+        "role": "recreated train-only reference",
+        "eligible_for_promotion": false,
+        "training_seeds": [
+          42
+        ],
+        "training_period": [
+          "2005-01-01",
+          "2019-12-31"
+        ],
+        "checkpoint_sha256": "1e78821512364935cbd19412a20b639b3dbf5f42d59eef667475eb1aa31e4ea0",
+        "evaluation_period": [
+          "2020-01-01",
+          "2021-12-31"
+        ],
+        "benchmark_archive_sha256": "f37bdbd0bd44e6fe951adf36c9a08620075f9d17de391b04c97d61f06797903b",
+        "benchmark_command": "& .venv/Scripts/python.exe -B tests/benchmark.py --weights tests/_windows/calibration/reference-final/airavat.pt --label CPU-train-only",
+        "forecast": {
+          "points": 30.94836474428822,
+          "rmse_pts": 19.10651402345665,
+          "csi_pts": 11.841850720831568,
+          "mean_csi_skill": 0.07894567147221046,
+          "mean_skill_vs_best_by_lead": [
+            0.23493306594166521,
+            0.013767717571583533,
+            -0.01942261523176896
+          ],
+          "day8_variance_ratio": [
+            0.8724749684333801,
+            0.5574144124984741,
+            1.0672800540924072,
+            0.8821223974227905,
+            0.9094918966293335,
+            0.8822968602180481
+          ],
+          "anti_blur_points": 10.0
+        },
+        "shocks": {
+          "propagation": 19,
+          "locality": 20,
+          "stability": 20,
+          "response_count": 20,
+          "zero_exact": 10,
+          "window_count": 10
+        }
+      },
+      {
+        "label": "E4-smoke",
+        "role": "three functional-test members derived from one trained seed",
+        "eligible_for_promotion": false,
+        "training_seeds": [
+          42
+        ],
+        "training_period": [
+          "2005-01-01",
+          "2019-12-31"
+        ],
+        "checkpoint_sha256": "d1afe17ed1cd41b93cb3efc2342a86ac4dc63c7a2a8888b501bda8536a51d77d",
+        "evaluation_period": [
+          "2020-01-01",
+          "2021-12-31"
+        ],
+        "benchmark_archive_sha256": "f37bdbd0bd44e6fe951adf36c9a08620075f9d17de391b04c97d61f06797903b",
+        "benchmark_command": "& .venv/Scripts/python.exe -B -m tests.benchmark --weights tests/_windows/ensemble-smoke/e4 --label E4-smoke",
+        "forecast": {
+          "points": 30.713916035476615,
+          "rmse_pts": 19.117920520608493,
+          "csi_pts": 11.595995514868124,
+          "mean_csi_skill": 0.0773066367657875,
+          "mean_skill_vs_best_by_lead": [
+            0.2349581036334,
+            0.013981191705973964,
+            -0.019524249092072073
+          ],
+          "day8_variance_ratio": [
+            0.8723398447036743,
+            0.5543099045753479,
+            1.0670967102050781,
+            0.8819673657417297,
+            0.9094341993331909,
+            0.8821503520011902
+          ],
+          "anti_blur_points": 10.0,
+          "max_rain_ratios": {
+            "cyclone": {
+              "peak_ratio": 0.9067865549141484,
+              "ratios_by_lead": {
+                "1": 0.9067865549141484,
+                "4": 0.7815512991337789,
+                "8": 0.344459675770864
+              }
+            },
+            "heavy_rain": {
+              "peak_ratio": 0.27815366176017836,
+              "ratios_by_lead": {
+                "1": 0.27815366176017836,
+                "4": 0.3504221422377786,
+                "8": 0.7955386110066621
+              }
+            }
+          }
+        },
+        "shocks": {
+          "propagation": 19,
+          "locality": 20,
+          "stability": 20,
+          "response_count": 20,
+          "zero_exact": 10,
+          "window_count": 10
+        }
+      },
+      {
+        "label": "E5-smoke",
+        "role": "the same functional-test members with non-proxy shrinkage",
+        "eligible_for_promotion": false,
+        "training_seeds": [
+          42
+        ],
+        "training_period": [
+          "2005-01-01",
+          "2019-12-31"
+        ],
+        "checkpoint_sha256": "4834dc93067131405bb8da31946558375d4842f5d181ee221d06d4fbcf92cf3c",
+        "evaluation_period": [
+          "2020-01-01",
+          "2021-12-31"
+        ],
+        "benchmark_archive_sha256": "f37bdbd0bd44e6fe951adf36c9a08620075f9d17de391b04c97d61f06797903b",
+        "benchmark_command": "& .venv/Scripts/python.exe -B -m tests.benchmark --weights tests/_windows/ensemble-smoke/e5 --label E5-smoke",
+        "forecast": {
+          "points": 31.36845804387211,
+          "rmse_pts": 19.772462529003985,
+          "csi_pts": 11.595995514868124,
+          "mean_csi_skill": 0.0773066367657875,
+          "mean_skill_vs_best_by_lead": [
+            0.23464623503176338,
+            0.017598181660057898,
+            -0.014974866343773496
+          ],
+          "day8_variance_ratio": [
+            0.8745500445365906,
+            0.5543099045753479,
+            1.018775224685669,
+            0.8296083211898804,
+            0.9079615473747253,
+            0.8675284385681152
+          ],
+          "anti_blur_points": 10.0,
+          "max_rain_ratios": {
+            "cyclone": {
+              "peak_ratio": 0.9067865549141484,
+              "ratios_by_lead": {
+                "1": 0.9067865549141484,
+                "4": 0.7815512991337789,
+                "8": 0.344459675770864
+              }
+            },
+            "heavy_rain": {
+              "peak_ratio": 0.27815366176017836,
+              "ratios_by_lead": {
+                "1": 0.27815366176017836,
+                "4": 0.3504221422377786,
+                "8": 0.7955386110066621
+              }
+            }
+          }
+        },
+        "shocks": {
+          "propagation": 19,
+          "locality": 20,
+          "stability": 20,
+          "response_count": 20,
+          "zero_exact": 10,
+          "window_count": 10
+        },
+        "shrinkage_validation_windows": 573,
+        "fitting_command": "& .venv/Scripts/python.exe -B -m train.fit_shrinkage tests/_windows/india_climate_train.nc --weights tests/_windows/ensemble-smoke/e4 --output tests/_windows/ensemble-smoke/e5"
+      }
+    ]
   }
 }
