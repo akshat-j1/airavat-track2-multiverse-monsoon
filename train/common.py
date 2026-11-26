@@ -8,8 +8,7 @@ import xarray as xr
 
 from model.unet import CHANNELS, LAT, LON, RAIN, STATIC_CHANNELS
 
-TRAIN_END = np.datetime64("2020-01-01")
-VALIDATION_END = np.datetime64("2022-01-01")
+DEFAULT_VAL_YEARS = 2
 LEADS = (1, 4, 8)
 PERIOD = 365
 HARMONICS = 3
@@ -70,14 +69,31 @@ def seasonal_fields(coefficients):
     return flat.reshape(PERIOD, *coefficients.shape[1:])
 
 
-def window_ends(dates, steps, split):
-    last_input = np.arange(2, len(dates) - steps)
-    first_day = dates[last_input - 2]
-    last_day = dates[last_input + steps]
-    if split == "train":
-        return last_input[last_day < TRAIN_END]
-    if split == "validation":
-        return last_input[(first_day >= TRAIN_END) & (last_day < VALIDATION_END)]
+def validation_start(dates, val_years=DEFAULT_VAL_YEARS):
+    """Return the row index where the last N represented calendar years begin."""
+    if val_years < 1:
+        raise ValueError("--val-years must be at least one")
+    years = dates.astype("datetime64[Y]")
+    first_validation_year = years[-1] - np.timedelta64(val_years - 1, "Y")
+    cut = int(np.searchsorted(years, first_validation_year))
+    if cut == 0:
+        raise ValueError("--val-years must leave at least one calendar year for training")
+    return cut
+
+
+def year_range(dates):
+    first, last = dates[[0, -1]].astype("datetime64[Y]")
+    return str(first) if first == last else f"{first}–{last}"
+
+
+def window_ends(record_count, steps, split, *, val_start=None):
+    """Keep all three input days and all targets inside the same partition."""
     if split == "all":
-        return last_input[last_day < VALIDATION_END]
+        return np.arange(2, record_count - steps)
+    if val_start is None or not 0 < val_start < record_count:
+        raise ValueError("A validation start within the dataset is required")
+    if split == "train":
+        return np.arange(2, val_start - steps)
+    if split == "validation":
+        return np.arange(val_start + 2, record_count - steps)
     raise ValueError(f"Unknown split {split!r}")

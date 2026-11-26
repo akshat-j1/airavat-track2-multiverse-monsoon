@@ -43,6 +43,10 @@ class Engine:
         if perturbed is not None:
             previous, branched = encoded[:, -1].chunk(2)
             response = branched - previous
+            # Bound the first-day learned correction to the shock and nearby cells.
+            # Wind-driven transport still moves and diffuses the response each day.
+            initial_support = response.ne(0).any(dim=1, keepdim=True).to(response.dtype)
+            first_day_support = torch.nn.functional.max_pool2d(initial_support, 7, stride=1, padding=3)
         initial_phases = torch.stack([advance_phase(phases, day) for day in (-2, -1, 0)], dim=1)
         initial_climatology = climatology_at(self._coefficients, initial_phases)
         history = (encoded - initial_climatology) / self._scale
@@ -57,7 +61,10 @@ class Engine:
                 reference, candidate = encoded.chunk(2)
                 wind = 0.5 * (previous[:, 2:4] + reference[:, 2:4])
                 transported = transport_response(response, wind)
-                branch = reference + 0.20 * (candidate - reference) + 0.80 * transported
+                learned_response = candidate - reference
+                if day == 0:
+                    learned_response = learned_response * first_day_support
+                branch = reference + 0.20 * learned_response + 0.80 * transported
                 branch[:, 0].clamp_(233.15, 333.15)
                 branch[:, 1].clamp_(0, math.log1p(400))
                 updated = torch.cat((reference, branch))

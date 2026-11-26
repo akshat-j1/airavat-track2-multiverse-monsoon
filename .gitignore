@@ -3,3 +3,5 @@ __pycache__/
 *.nc
 *.nc4
 *.netcdf
+tests/_windows/
+*.log
