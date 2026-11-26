@@ -60,6 +60,31 @@ and uses the base training objective as the comparison loss. Validation
 always uses model predictions without augmentation. Run the official
 benchmark with the frozen candidates after selection.
 
+### Ensemble and shrinkage checkpoints
+
+For an ensemble, put the first member at `airavat.pt` and the remaining
+members at `airavat-member-*.pt` in the same directory. Members must have the
+same climatology, anomaly scale, and static fields. The engine runs each
+member's rollout independently and averages the anomalies before decoding.
+Pass a file to the benchmark to evaluate one member or a directory to
+evaluate the bundle.
+
+```sh
+python -m tests.benchmark --weights /tmp/e4 --label E4
+python -m train.fit_shrinkage "$DATA_NC" --weights /tmp/e4 --output /tmp/e5
+python -m tests.benchmark --weights /tmp/e5 --label E5
+```
+
+The fitter requires checkpoint metadata showing that training and the
+climatology fit ended before the holdout. It excludes windows that overlap
+any of the five proxies and fits a constrained least-squares multiplier in
+anomaly space for each of the 14 leads and six channels. Only the primary
+checkpoint in the new bundle stores the multiplier array. The rain
+multiplier stays at 1 for every lead, preserving the unshrunk ensemble's
+rain peaks. The benchmark reports model-to-observed peak rain ratios for
+the cyclone and heavy-rain proxies. Larger leads use the array's own fitted
+row.
+
 ## Reproduce the shipped checkpoint
 
 The retained 15-epoch checkpoint was trained on the organizer archive with SHA-256

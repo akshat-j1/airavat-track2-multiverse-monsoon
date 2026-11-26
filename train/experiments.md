@@ -580,3 +580,132 @@ The updated E0 benchmark emitted `16 | 32342 | 344546 | 37.15 | -2.58%` for
 width, parameters, bytes, forecast points, and day-8 skill. Its first
 10-step engine call took 0.0370 s. The forecast and shock fields matched the
 previous E0 JSON.
+
+## Step 7 — Ensemble inference and held-out shrinkage
+
+The extended archive remains unavailable and there is no winning
+configuration to train across seeds. E4 and E5 below are smoke bundles.
+They share one recreated train-only network with controlled changes to the
+member rain biases. They are not independently trained candidates.
+
+Added optional ensemble loading and pre-decode anomaly averaging. Kept the
+format at version 1. The fitter used 573 complete 14-step holdout windows
+after excluding every window sharing inputs or targets with a proxy.
+It fixed the rain multipliers at 1. The benchmark reports both the peak
+ratios for individual scored leads and the ratio of the maxima across
+days 1, 4, and 8.
+
+### Commands
+
+The legacy snapshot in this command was captured with `Engine("weights")`
+before editing the engine. It uses the same `real.npz` initial state and
+warm-ocean shock as the comparison.
+
+```powershell
+$env:OMP_NUM_THREADS = '4'
+$env:MKL_NUM_THREADS = '4'
+@'
+from pathlib import Path
+import numpy as np
+import torch
+from engine.engine import Engine, MAX_STEPS
+from monsoon_r1 import scoring
+from train.fit_shrinkage import check_training_scope
+
+root = Path("tests/_windows/ensemble-smoke")
+e4 = root / "e4"
+e4.mkdir(exist_ok=True)
+torch.set_num_threads(4)
+with np.load("tests/_windows/real.npz", allow_pickle=False) as sample:
+    history, phase = sample["init_states"], sample["doy_sincos"]
+legacy = np.load(root / "legacy.npz", allow_pickle=False)
+shipped = Engine("weights")
+shock = scoring.make_shock("warm_ocean", history[-1], scoring.STD_DEFAULT)
+assert np.array_equal(legacy["null"], shipped.simulate(history, phase, 14))
+assert np.array_equal(legacy["shock"], shipped.simulate(history, phase, 14, shock))
+print("Legacy forecasts and warm-ocean shocks bit-identical", flush=True)
+
+reference = root.parent / "calibration/reference-final/airavat.pt"
+for filename, shift in (("airavat.pt", 0), ("airavat-member-a.pt", .02), ("airavat-member-b.pt", -.025)):
+    package = torch.load(reference, map_location="cpu", weights_only=True)
+    package["model"]["output.bias"][1] += shift
+    torch.save(package, e4 / filename)
+
+engine = Engine(e4)
+base = engine.simulate(history, phase, MAX_STEPS)
+for delta in (scoring.make_shock("null", history[-1], scoring.STD_DEFAULT), np.full((6, 32, 36), 1e-30, dtype="f4")):
+    assert np.array_equal(base, engine.simulate(history, phase, MAX_STEPS, delta))
+assert not scoring.validity(base, MAX_STEPS)
+physical_members = [Engine(path).simulate(history, phase, MAX_STEPS) for path in sorted(e4.glob("*.pt"))]
+from model.unet import decode_physical
+batch = torch.from_numpy(history.astype('f4'))[None]
+phase_f32 = phase.astype('f4')
+phases = torch.from_numpy(phase_f32 / float(np.linalg.norm(phase_f32)))[None]
+components = [Engine(path)._encoded_forecast(batch, phases, MAX_STEPS) for path in sorted(e4.glob("*.pt"))]
+stack = torch.stack([torch.stack(states, dim=1) for states, _ in components])
+expected = np.stack([decode_physical(stack.mean(dim=0)[:, day], day + 1)[0].numpy() for day in range(MAX_STEPS)])
+np.testing.assert_allclose(expected[:, 1], base[:, 1], rtol=2e-6, atol=2e-6)
+assert np.max(np.abs(np.mean(physical_members, axis=0)[:, 1] - base[:, 1])) > 1e-5
+try:
+    check_training_scope([Path("weights/airavat.pt")], np.datetime64("2020-01-01"))
+except ValueError:
+    pass
+else:
+    raise AssertionError("Expected the fitter to reject in-sample E0")
+print("Three members: anomaly-before-decode, exact null/subprecision, validity, and in-sample rejection PASS", flush=True)
+'@ | & .venv/Scripts/python.exe -B -
+& .venv/Scripts/python.exe -B -m train.fit_shrinkage tests/_windows/india_climate_train.nc --weights tests/_windows/ensemble-smoke/e4 --output tests/_windows/ensemble-smoke/e5
+& .venv/Scripts/python.exe -B -m tests.benchmark --weights tests/_windows/ensemble-smoke/e4 --label E4-smoke
+& .venv/Scripts/python.exe -B -m tests.benchmark --weights tests/_windows/ensemble-smoke/e5 --label E5-smoke
+& .venv/Scripts/python.exe -B -m tests.benchmark --weights weights --label E0-ensemble-check
+```
+
+```text
+Legacy forecasts and warm-ocean shocks bit-identical
+Three members: anomaly-before-decode, exact null/subprecision, validity, and in-sample rejection PASS
+E0 official forecast fields and E4/E5 rain peaks match exactly
+```
+
+Cold HTTP measurements reused the four-physical-core launcher from Step 1.
+The only change to the launched process was routing its `Engine` constructor
+to the scratch bundle. The script checked HTTP response validity and the
+1.5 s limit. The application source stayed untouched.
+
+```powershell
+@'
+from pathlib import Path
+import subprocess
+import sys
+
+doc = Path("train/experiments.md").read_text(encoding="utf-8")
+cold = doc.split("### Cold server on four physical cores", 1)[1]
+program = cold.split("@'\n", 1)[1].split("\n'@", 1)[0]
+program = program.replace("import json, os, socket, subprocess, time",
+                          "import json, os, socket, subprocess, sys, time")
+program = program.replace("runpy.run_path('serve.py', run_name='__main__')", """
+import os
+from engine import engine as engine_module
+real_engine = engine_module.Engine
+engine_module.Engine = lambda _: real_engine(os.environ['AIRAVAT_SMOKE_WEIGHTS'])
+runpy.run_path('serve.py', run_name='__main__')""")
+program = program.replace('env.pop("MONSOON_DEV_STUB", None)',
+    'env.pop("MONSOON_DEV_STUB", None)\nenv["AIRAVAT_SMOKE_WEIGHTS"] = str(Path(sys.argv[1]).resolve())')
+program = program.replace("elapsed = time.perf_counter() - start",
+                          "elapsed = time.perf_counter() - start\n    assert elapsed < 1.5")
+for name in ("e4", "e5"):
+    subprocess.run([sys.executable, "-B", "-c", program, str(Path("tests/_windows/ensemble-smoke") / name)], check=True)
+'@ | & .venv/Scripts/python.exe -B -
+```
+
+### Results
+
+| Run | Forecast /45 | Day-4 skill | Day-8 skill | Day-8 min variance ratio | Propagation / locality / stability / exact zero | Cyclone peak ratio | Heavy-rain peak ratio | First 10-step HTTP |
+|---|---:|---:|---:|---:|---|---:|---:|---:|
+| E0 shipped | 37.15 | +2.36% | −2.58% | 0.604 | 19/20 / 20/20 / 20/20 / 10/10 | 0.498 | 0.233 | 0.204 s from Step 1 |
+| E4 smoke | 30.71 | +1.40% | −1.95% | 0.554 | 19/20 / 20/20 / 20/20 / 10/10 | 0.907 | 0.278 | 0.273 s |
+| E5 smoke | 31.37 | +1.76% | −1.50% | 0.554 | 19/20 / 20/20 / 20/20 / 10/10 | 0.907 | 0.278 | 0.286 s |
+
+The benchmark-level rain peak ratios were exactly equal for E4 and E5,
+including every reported lead for each rain proxy. Both smoke bundles
+stayed below the latency limit and passed the shock gates. Their forecast
+scores remained below E0. No checkpoint was promoted.

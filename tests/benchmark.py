@@ -1,15 +1,12 @@
 """Score a checkpoint on the archived Airavat proxy and shock protocol."""
 
 import argparse
-from contextlib import contextmanager
 import hashlib
 from importlib.metadata import version
 import json
 from pathlib import Path
 import re
-import shutil
 import sys
-from tempfile import TemporaryDirectory
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +17,7 @@ import numpy as np
 import torch
 from monsoon_r1 import contract, scoring, stats
 
-from engine.engine import CHECKPOINT_NAME, Engine
+from engine.engine import Engine, checkpoint_paths
 from tests.eval_skill import evaluate_events, evaluate_shocks, probe_ends
 from train.common import LEADS, day_phase, load_weather, recorded_proxy_cases, validation_start
 
@@ -39,17 +36,22 @@ def sha256(path):
     return digest.hexdigest()
 
 
-@contextmanager
-def engine_directory(checkpoint):
-    if checkpoint.name == CHECKPOINT_NAME:
-        yield checkpoint.parent
-        return
-    with TemporaryDirectory(prefix="airavat-benchmark-") as directory:
-        shutil.copyfile(checkpoint, Path(directory) / CHECKPOINT_NAME)
-        yield Path(directory)
+def paired_rain_peaks(events):
+    ratios = {}
+    for event in ("cyclone", "heavy_rain"):
+        rows = [row for row in events if row["event"] == event]
+        observed = max(row["peak_rain_observed"] for row in rows)
+        ratios[event] = {
+            "peak_ratio": max(row["peak_rain_model"] for row in rows) / observed if observed else None,
+            "ratios_by_lead": {
+                row["lead"]: row["peak_rain_model"] / row["peak_rain_observed"] if row["peak_rain_observed"] else None
+                for row in rows
+            },
+        }
+    return ratios
 
 
-def benchmark(dataset, checkpoint, label):
+def benchmark(dataset, weights, label):
     if sha256(dataset) != ARCHIVE_SHA256:
         raise ValueError("Use the original organizer archive for a comparable benchmark")
     audit = json.loads((ROOT / "train" / "validation.json").read_text(encoding="utf-8"))["release_candidate_audit"]
@@ -65,10 +67,9 @@ def benchmark(dataset, checkpoint, label):
     history = weather.physical[first_shock - 2:first_shock + 1]
     phase = day_phase(weather.day_of_year[first_shock])
     torch.set_num_threads(CPU_THREADS)
-    with engine_directory(checkpoint) as directory:
-        start = time.perf_counter()
-        engine = Engine(directory)
-        load_seconds = time.perf_counter() - start
+    start = time.perf_counter()
+    engine = Engine(weights)
+    load_seconds = time.perf_counter() - start
     start = time.perf_counter()
     cold = engine.simulate(history, phase, contract.SCORE_STEPS)
     cold_seconds = time.perf_counter() - start
@@ -80,20 +81,33 @@ def benchmark(dataset, checkpoint, label):
         return stats.clim_for(climate, weather.dates[index].astype(object))
 
     forecast = evaluate_events(engine, weather, val_start, cases, climatology_for=climatology_for)
+    forecast["max_rain_ratios"] = paired_rain_peaks(forecast["events"])
     shocks = evaluate_shocks(engine, weather, ROOT / "assets" / "stats.json", 0, val_start, shock_dates)
     responses = [response for window in shocks for response in window["shocks"].values()]
-    package = torch.load(checkpoint, map_location="cpu", weights_only=True)
-    return {
-        "label": label,
-        "checkpoint": {
-            "sha256": sha256(checkpoint),
-            "bytes": checkpoint.stat().st_size,
+    members = []
+    for path in checkpoint_paths(weights):
+        package = torch.load(path, map_location="cpu", weights_only=True)
+        members.append({
+            "file": path.name,
+            "sha256": sha256(path),
+            "bytes": path.stat().st_size,
             "width": package["width"],
             "network_parameters": sum(tensor.numel() for tensor in package["model"].values()),
             "format_version": package["format_version"],
             "split": package.get("split"),
             "fit_period": package.get("fit_period"),
             "fit_periods": package.get("fit_periods"),
+            "shrinkage": "shrinkage_alpha" in package,
+        })
+    primary = members[0]
+    return {
+        "label": label,
+        "checkpoint": {
+            **primary,
+            "bytes": sum(member["bytes"] for member in members),
+            "network_parameters": sum(member["network_parameters"] for member in members),
+            "member_count": len(members),
+            "members": members,
         },
         "protocol": {
             "archive_sha256": ARCHIVE_SHA256,
@@ -132,14 +146,17 @@ def markdown(result):
     checkpoint = result["checkpoint"]
     label = " ".join(result["label"].split()).replace("|", "&#124;")
     day8 = forecast["mean_skill_vs_best_by_lead"][-1]
+    rain = forecast["max_rain_ratios"]
+    peak_cells = [f'{rain[event]["peak_ratio"]:.3f}' if rain[event]["peak_ratio"] is not None else "—"
+                  for event in ("cyclone", "heavy_rain")]
     return (
-        "| Label | Width | Parameters | Bytes | Forecast /45 | Day-8 skill | Anti-blur /10 | Propagation | Locality | Stability | Exact zero | Cold 10-step s |\n"
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n"
-        f"| {label} | {checkpoint['width']} | {checkpoint['network_parameters']} | {checkpoint['bytes']} | "
+        "| Label | Members | Width | Parameters | Bytes | Forecast /45 | Day-8 skill | Anti-blur /10 | Propagation | Locality | Stability | Exact zero | Cold 10-step s | Cyclone peak ratio | Heavy-rain peak ratio |\n"
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n"
+        f"| {label} | {checkpoint['member_count']} | {checkpoint['width']} | {checkpoint['network_parameters']} | {checkpoint['bytes']} | "
         f"{forecast['points']:.2f} | {day8:.2%} | {forecast['anti_blur_points']:.2f} | "
         f"{shocks['propagation']}/{shocks['response_count']} | {shocks['locality']}/{shocks['response_count']} | "
         f"{shocks['stability']}/{shocks['response_count']} | {shocks['zero_exact']}/{shocks['window_count']} | "
-        f"{result['timing']['cold_engine_simulate_s']:.4f} |\n"
+        f"{result['timing']['cold_engine_simulate_s']:.4f} | {' | '.join(peak_cells)} |\n"
     )
 
 
@@ -151,12 +168,11 @@ def main():
                         help="Path to the original organizer NetCDF archive")
     parser.add_argument("--output-dir", type=Path, default=SCRATCH / "benchmark")
     args = parser.parse_args()
-    checkpoint = args.weights / CHECKPOINT_NAME if args.weights.is_dir() else args.weights
     stem = re.sub(r"[^a-zA-Z0-9_-]+", "-", args.label).strip("-_")
     if not stem:
         parser.error("--label must contain at least one ASCII letter or digit")
     try:
-        result = benchmark(args.dataset, checkpoint, args.label)
+        result = benchmark(args.dataset, args.weights, args.label)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     report = json.dumps(result, indent=2, allow_nan=False)
