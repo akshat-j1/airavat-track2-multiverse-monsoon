@@ -12,9 +12,6 @@ import json
 from pathlib import Path
 import sys
 
-import xarray as xr
-
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -38,6 +35,8 @@ def find_coordinate(dataset, kind):
 
 
 def export_grid(input_path, output_path):
+    import xarray as xr
+
     with xr.open_dataset(input_path) as dataset:
         try:
             lat = find_coordinate(dataset, "lat")

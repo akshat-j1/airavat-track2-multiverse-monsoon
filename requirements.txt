@@ -3,7 +3,5 @@
 torch
 numpy
 scipy
-pandas
-xarray
 fastapi
 uvicorn

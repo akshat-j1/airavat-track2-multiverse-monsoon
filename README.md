@@ -26,8 +26,9 @@ Open `http://127.0.0.1:8000/dashboard/`. The server binds to `0.0.0.0` by defaul
 Strict mode prevents startup/request failures from silently falling back to the
 development stub. `/health` must report `airavat-anomaly-unet`, without `stub`.
 The checkpoint is `weights/airavat.pt`, loaded from the repository's weights
-directory. Inference needs no training archive, official kit, external service,
-network, GPU, or generated cache in the repository.
+directory. Serving uses only the runtime dependencies in `requirements.txt`.
+`requirements-train.txt` contains dependencies for training and dataset inspection
+only, including xarray and netCDF4.
 
 The frontend uses only local files in `dashboard/`; it has no external fonts,
 scripts, CDN assets, or build step. It calls the same origin under `/dashboard/`,
@@ -68,6 +69,14 @@ python tests/check_shocks.py --url http://127.0.0.1:8000 --require-real
 node tests/check_impact.js
 ```
 
+To check shocks on real observations, install the dataset dependencies and
+export a local test window from the official archive:
+
+```powershell
+python tools/export_window.py --input C:\external-data\india_climate_train.nc --last-index 195 --output tests/_windows/real.npz
+python tests/check_shocks.py --url http://127.0.0.1:8000 --require-real --window tests/_windows/real.npz
+```
+
 The first command requires the official `monsoon_r1_kit-1.0.0-py3-none-any.whl`
 from the [organizers' v1.0.0 release](https://github.com/OfficialAbhinavSingh/yug-monsoon-kit/releases/tag/v1.0.0)
 and its local client dependencies. These are testing tools, not server runtime
@@ -81,30 +90,10 @@ that client overhead for latency measurements.
 
 ## Train and assess skill
 
-Part A owns `engine/engine.py`, `model/`, `train/`, `weights/`, `assets/`, and
-`tests/eval_skill.py`. Its training archive must remain outside Git. Training
-expects the official dataset schema, including `data`, `static`, the named
-channel coordinates, and consecutive dates.
-
-```powershell
-python -m train.inspect C:\external-data\india_climate_train.nc
-python -m train.train C:\external-data\india_climate_train.nc --output C:\external-models\heldout\airavat.pt --split train --device cpu --threads 4
-python -m tests.eval_skill C:\external-data\india_climate_train.nc --weights C:\external-models\heldout
-python -m train.train C:\external-data\india_climate_train.nc --output C:\external-models\airavat.pt --split all --device cpu --threads 4
-```
-
-The evaluation weights directory must contain the held-out checkpoint named
-`airavat.pt`; the final all-years checkpoint is not a held-out skill test.
-Use `python -m train.train --help` for curriculum, width, resume, and batch options.
-The organizer sandbox supplies the packages in root `requirements.txt`.
-**Outstanding Part A packaging issue:** `train/requirements.txt` additionally
-lists `netCDF4`, which is not on the supplied sandbox list and is not vendored.
-NetCDF3 input works through the supplied SciPy backend; reading
-NetCDF4 input requires Part A to resolve that backend dependency before claiming
-training reproducibility in the supplied sandbox. See the integration report.
+Follow the training, dataset inspection, and held-out evaluation instructions in
+[train/README.md](train/README.md). Keep the training archive outside Git.
 
 ## Ownership and integration
 
 Work branches are `ml` and `app`; shared releases use `main`. Follow `CLAUDE.md`:
 rebase on shared `main` at handoff, preserve ownership, and never force-push.
-Do not push an integration with unresolved Part A verification failures.
