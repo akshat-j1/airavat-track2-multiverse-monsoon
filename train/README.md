@@ -11,3 +11,47 @@ python -m train.train /path/to/india_climate_train.nc --split all --output weigh
 ```
 
 `--val-years 2` reserves the last two calendar years represented in the dataset. This includes a partial final year if one is present. Every forecast window stays within its partition. `--split all` fits on the entire time axis for deployment. To run the optional shock diagnostics in `tests.eval_skill`, install the official kit wheel and supply its `stats.json`.
+
+## Reproduce the shipped checkpoint
+
+The retained 15-epoch checkpoint was trained on the organizer archive with SHA-256
+`f37bdbd0bd44e6fe951adf36c9a08620075f9d17de391b04c97d61f06797903b`.
+The original run used Apple MPS, Python 3.14.7, PyTorch 2.15.0, NumPy 2.5.5,
+xarray 2026.9.0, and netCDF4 1.7.5.1.post1. Expect CPU or other backends to
+produce different weights and rerun the validation metrics on the result.
+
+Stage 1 uses the original Gaussian shock augmentation at commit `0b87d20`.
+Stage 2 uses compact raised-cosine shocks and the far-field penalty in the
+current trainer. Run from the repository root with an activated training venv.
+
+```sh
+DATANC=/absolute/path/to/india_climate_train.nc
+PYTHON_BIN="$(command -v python)"
+RUN=$(mktemp -d)
+mkdir -p "$RUN/source"
+git archive 0b87d20 engine model train | tar -x -C "$RUN/source"
+(
+  cd "$RUN/source"
+  PYTORCH_ENABLE_MPS_FALLBACK=1 "$PYTHON_BIN" -m train.train "$DATANC" \
+    --split all --device mps --seed 42 --width 16 --batch-size 48 \
+    --curriculum 1,1,1,2,2,3,4,4,6,8,8 --learning-rate 0.002 \
+    --output "$RUN/base/airavat.pt"
+)
+PYTORCH_ENABLE_MPS_FALLBACK=1 "$PYTHON_BIN" -m train.train "$DATANC" \
+  --split all --device mps --seed 42 --width 16 --batch-size 48 \
+  --curriculum 1,2,3,4 --learning-rate 0.00035 --far-field-weight 18 \
+  --event-rain-weight 0 --resume "$RUN/base/airavat.pt" \
+  --output "$RUN/final/airavat.pt"
+```
+
+For held-out evaluation, use `--split train` in both stages and
+`--val-years 2` in stage 2. Pass the event archive's externally chosen first
+verification days as `--event LABEL=DATE` and `--shock-target DATE` arguments
+to `python -m tests.eval_skill`. The case dates and metrics in
+`validation.json` record the audit replay. The deployment checkpoint's shock
+probes use archive observations included in its training period.
+
+The experimental `--event-rain-weight` loss adds intensity, local peak and
+rainfall gradient terms. The tested settings increased some storm peaks and
+reduced the aggregate event score, so the integrated candidate preserves the
+shipped weights.

@@ -48,8 +48,24 @@ def transport_anomaly(delta, wind):
     return delta
 
 
+def rain_event_loss(predicted, observed):
+    """Retain intense rain and local gradients while tolerating small displacements."""
+    predicted_mm, observed_mm = predicted.expm1(), observed.expm1()
+    pred_root = (predicted_mm + 1).sqrt()
+    obs_root = (observed_mm + 1).sqrt()
+    weights = 1 + (observed_mm / 30).clamp_max(3)
+    intensity = (F.smooth_l1_loss(pred_root, obs_root, reduction="none") * weights).mean()
+    nearby = F.max_pool2d(pred_root[:, None], 3, stride=1, padding=1)[:, 0]
+    extreme = observed_mm >= 30
+    shortfall = F.relu(obs_root - nearby - 0.5)
+    peaks = (shortfall.square() * extreme).sum() / extreme.sum().clamp_min(1)
+    row_energy = F.l1_loss(pred_root.diff(dim=1).abs(), obs_root.diff(dim=1).abs())
+    column_energy = F.l1_loss(pred_root.diff(dim=2).abs(), obs_root.diff(dim=2).abs())
+    return 0.45 * intensity + 0.10 * peaks + 0.20 * (row_energy + column_energy)
+
+
 def rollout_loss(model, weather, doy, phase, climate, ends, horizon, scale, features, latitude_weight,
-                 augment, far_field_weight):
+                 augment, far_field_weight, event_rain_weight):
     history_idx = ends[:, None] + torch.arange(-2, 1, device=ends.device)
     history = (weather[history_idx] - climate[doy[history_idx]]) / scale
     clean_count = len(ends)
@@ -93,6 +109,8 @@ def rollout_loss(model, weather, doy, phase, climate, ends, horizon, scale, feat
         predicted_rain_std = predicted_rain.expm1().flatten(1).std(dim=-1, correction=0)
         rain_variance_loss = (F.relu(0.76 * rain_std - predicted_rain_std) / 10).square().mean()
         loss = loss + error + 0.13 * rain_loss + 0.16 * variance_loss + 0.09 * rain_variance_loss + paired_loss
+        if event_rain_weight:
+            loss = loss + event_rain_weight * rain_event_loss(predicted_rain, rain)
     return loss / horizon
 
 
@@ -134,6 +152,8 @@ def main():
     parser.add_argument("--learning-rate", type=float, default=0.002)
     parser.add_argument("--far-field-weight", type=float, default=DEFAULT_FAR_FIELD_WEIGHT,
                         help="Penalty on day-one shock energy outside the perturbed neighborhood")
+    parser.add_argument("--event-rain-weight", type=float, default=0,
+                        help="Weight for the fine-tuning loss on rain intensity, peaks and gradients")
     parser.add_argument("--resume", type=Path, help="Initialize the network from an earlier checkpoint")
     args = parser.parse_args()
     try:
@@ -146,6 +166,8 @@ def main():
         parser.error("Batch size, thread count, and learning rate must be positive")
     if args.val_years < 1 or not math.isfinite(args.far_field_weight) or args.far_field_weight < 0:
         parser.error("Validation years must be positive and far-field weight must be finite and nonnegative")
+    if not math.isfinite(args.event_rain_weight) or args.event_rain_weight < 0:
+        parser.error("Event rain weight must be finite and nonnegative")
 
     torch.set_num_threads(args.threads)
     torch.manual_seed(args.seed)
@@ -167,6 +189,10 @@ def main():
         "val_years": args.val_years if val_start is not None else None,
         "fit_period": [str(fit_dates[0]), str(fit_dates[-1])],
         "far_field_weight": args.far_field_weight,
+        "event_rain_weight": args.event_rain_weight,
+        "seed": args.seed,
+        "curriculum": horizons,
+        "learning_rate": args.learning_rate,
     }
     windows = {steps: window_ends(len(data.dates), steps, args.split, val_start=val_start)
                for steps in set(horizons)}
@@ -212,7 +238,7 @@ def main():
             optimizer.zero_grad(set_to_none=True)
             loss = rollout_loss(model, weather, day_idx, phase, climate, batch, horizon,
                                 scale, features, latitude_weight, augment=epoch > 1 or args.resume is not None,
-                                far_field_weight=args.far_field_weight)
+                                far_field_weight=args.far_field_weight, event_rain_weight=args.event_rain_weight)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 2)
             optimizer.step()
