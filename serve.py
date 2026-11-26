@@ -17,6 +17,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "4")
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/mpl")
 
 import argparse  # noqa: E402
+import asyncio  # noqa: E402
 import base64  # noqa: E402
 import binascii  # noqa: E402
 import json  # noqa: E402
@@ -38,6 +39,7 @@ ROOT = Path(__file__).resolve().parent
 N_IN, N_CH, H, W = 3, 6, 32, 36
 MAX_STEPS = 14  # official monsoon_r1.contract.MAX_STEPS; no kit needed at runtime
 MAX_BODY_BYTES = 8 * 1024 * 1024
+REJECTED_BODY_DRAIN_TIMEOUT_SECONDS = 0.25
 PHASE_TOLERANCE = 1e-6
 INPUT_BOUNDS = (
     ("t2m", 150, 350), ("tp", 0, 1000), ("u10", -100, 100),
@@ -187,9 +189,26 @@ def parse_request(body):
     return init.astype(np.float32, copy=False), phase, steps, pert
 
 
+async def _discard_rejected_body(request):
+    """Consume an already-sent upload without storing it or waiting indefinitely."""
+    received = 0
+    while received < MAX_BODY_BYTES:
+        message = await request.receive()
+        if message["type"] == "http.disconnect" or not message.get("more_body", False):
+            return
+        received += len(message.get("body", b""))
+
+
 async def _read_json(request):
     media_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
     if media_type != "application/json" and not (media_type.startswith("application/") and media_type.endswith("+json")):
+        # Closing with unread upload bytes can reset the client's 415 response.
+        # A client waiting for 100 Continue has not been asked to send its body.
+        if request.headers.get("expect", "").strip().lower() != "100-continue":
+            try:
+                await asyncio.wait_for(_discard_rejected_body(request), timeout=REJECTED_BODY_DRAIN_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                pass
         raise HTTPException(status_code=415, detail="Content-Type must be application/json")
     content_length = request.headers.get("content-length", "")
     if content_length.isdecimal() and int(content_length) > MAX_BODY_BYTES:
