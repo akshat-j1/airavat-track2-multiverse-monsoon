@@ -104,7 +104,7 @@ def evaluate_forecasts(engine, weather, val_start, stride):
     }
 
 
-def evaluate_shocks(engine, weather, stats_path, samples, val_start, dates=()):
+def evaluate_shocks(engine, weather, stats_path, samples, val_start, dates=(), *, audit_null=False):
     from monsoon_r1 import contract, scoring
 
     with stats_path.open(encoding="utf-8") as file:
@@ -137,6 +137,8 @@ def evaluate_shocks(engine, weather, stats_path, samples, val_start, dates=()):
                   "null_consistent": bool(scoring.null_consistent(base, null, std)),
                   "zero_shock_exact": bool(np.array_equal(base, null)),
                   "subprecision_shock_exact": bool(np.array_equal(base, tiny_result)), "shocks": {}}
+        if audit_null:
+            result["null_checks"] = scoring.causality_checks(base, null, contract.BOX_BAY_OF_BENGAL, std)
         for name, box in boxes.items():
             delta = scoring.make_shock(name, history[-1], std)
             start = time.perf_counter()

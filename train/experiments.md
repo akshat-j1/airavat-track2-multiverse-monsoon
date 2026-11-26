@@ -709,3 +709,68 @@ The benchmark-level rain peak ratios were exactly equal for E4 and E5,
 including every reported lead for each rain proxy. Both smoke bundles
 stayed below the latency limit and passed the shock gates. Their forecast
 scores remained below E0. No checkpoint was promoted.
+
+## Step 8 — Expanded causal audit
+
+Added a repeatable audit and ran it on E0 and the E4 and E5 smoke bundles.
+The extended archive is still absent, so there is no trained winner to
+audit. The same input draws were used for all three bundles. No model,
+transport, checkpoint, or server changes were needed for this audit.
+
+```powershell
+$env:OMP_NUM_THREADS = '4'
+$env:MKL_NUM_THREADS = '4'
+& .venv/Scripts/python.exe -B -m tests.audit_causality --weights weights --output tests/_windows/causality-audit/E0.json
+& .venv/Scripts/python.exe -B -m tests.audit_causality --weights tests/_windows/ensemble-smoke/e4 --output tests/_windows/causality-audit/E4-smoke.json
+& .venv/Scripts/python.exe -B -m tests.audit_causality --weights tests/_windows/ensemble-smoke/e5 --output tests/_windows/causality-audit/E5-smoke.json
+```
+
+The audit reports the original ten official windows separately from the
+five proxies plus ten random holdout windows. It uses seed 42 and samples
+3, 2, 3, and 2 random windows from DJF, MAM, JJAS, and ON. The random
+windows exclude those sharing rows with the proxies or archived shock
+windows. The ten judge draws use a raised-cosine bump, signed amplitude
+between 0.5 and 3 standard deviations, and radius between 2 and 8 cells.
+A draw that would make initial rain or moisture negative uses a positive
+amplitude. The kit gets the tight grid-aligned box around the bump as
+the judge shock region. Weak wind is the bottom quartile of daily
+Arabian Sea box mean wind speed in the holdout, at or below 3.6195 m/s.
+
+| Bundle | Official propagation | Official exact zero | Expanded propagation | Expanded exact zero | Judge failures | Invalid / saturated / growing-drift 14-step rollouts |
+|---|---:|---:|---:|---:|---:|---:|
+| E0 | 19/20 | 10/10 | 29/30 | 15/15 | 3/10 | 0/20 / 4/20 / 20/20 |
+| E4 smoke | 19/20 | 10/10 | 29/30 | 15/15 | 3/10 | 0/20 / 0/20 / 20/20 |
+| E5 smoke | 19/20 | 10/10 | 29/30 | 15/15 | 3/10 | 0/20 / 0/20 / 20/20 |
+
+On E5 smoke, both non-null shocks passed nonzero, localized, stable,
+and no-teleport on 15/15 windows each. Warm-ocean propagation was 14/15,
+with day-one near fraction 99.8848% mean and 99.6729% minimum.
+Monsoon-stall propagation was 15/15, with near fraction 99.9835% mean
+and 99.9387% minimum. Stall passed in all seasons (DJF 4/4, MAM 4/4,
+JJAS 5/5, and ON 2/2) and in all five distinct weak-wind cases across
+the two panels. The common official propagation miss was warm ocean
+with last input on 2020-05-17.
+
+All 15 expanded null shocks were bit-exact controls. The kit reported
+zero nonzero, locality, and propagation flags and 15/15 stability and
+no-teleport flags. Its near fraction is zero when response energy is zero.
+
+All three bundles failed outward propagation on the same judge draws.
+They remained finite, nonnegative in rain, local, stable, and below
+the kit's teleportation limit.
+
+| Last input | Channel | Radius |
+|---|---|---:|
+| 2021-01-13 | t2m | 6.97 cells |
+| 2021-05-09 | t2m | 7.82 cells |
+| 2021-10-16 | tcwv | 6.20 cells |
+
+For each 14-step proxy rollout, drift is the RMS across channels of
+latitude-weighted domain-mean forecast bias against observations, in
+channel standard deviations. Growth compares the mean of days 11–14
+with days 1–4. Mean early and late drift across the 20 rollouts was
+0.0948 and 0.1938 for E0, 0.0963 and 0.1852 for E4, and 0.0959 and
+0.1921 for E5. E0 reached the lower moisture bound in the four winter
+disturbance rollouts. Exact output-bound hits were absent in E4 and E5.
+The judge and drift goals remain unmet. The weak-wind transport-change
+condition did not trigger.
