@@ -6,7 +6,7 @@ Start from a synthetic three-day window, upload three observations, or spin up t
 
 ![Day-four precipitation for a 2 K warming in the Bay of Bengal](dashboard.png)
 
-*The Bay of Bengal demo uses synthetic inputs. On day 4, its peak rain difference was about 0.46 mm/day. The response footprint is the smallest set of cells containing 90% of the squared rainfall response.*
+*The Bay of Bengal demo uses synthetic inputs. On day 4, the peak rain difference was 0.17 mm/day and the response footprint was 141 cells. The footprint is the smallest set of cells containing 90% of the squared rainfall response.*
 
 ## Use case and limits
 

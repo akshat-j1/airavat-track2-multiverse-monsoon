@@ -5,6 +5,7 @@ from html import escape
 from pathlib import Path
 import re
 
+from reportlab import rl_config
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
@@ -77,6 +78,7 @@ def main():
     if not args.page1.is_file():
         parser.error(f"Contributor A's page 1 is missing: {args.page1}")
 
+    rl_config.useA85 = False
     document = SimpleDocTemplate(
         str(args.output), pagesize=A4, leftMargin=MARGIN, rightMargin=MARGIN,
         topMargin=62, bottomMargin=47, title="Airavat - Multiverse of Monsoon",
