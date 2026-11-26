@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from engine.engine import Engine
-from model.unet import CHANNELS, STATE_SHAPE
+from model.unet import CHANNELS
 from train.common import DEFAULT_VAL_YEARS, LEADS, PERIOD, day_phase, load_weather, validation_start, window_ends, year_range
 from train.eval_baselines import forecast_metrics, validation_cases
 
@@ -24,20 +24,25 @@ def probe_ends(weather, dates, val_start, horizon):
     return indices - 1
 
 
-def evaluate_events(engine, weather, val_start, events):
+def evaluate_events(engine, weather, val_start, events, *, climatology_for=None):
     from monsoon_r1 import scoring
 
     labels, dates = zip(*(item.split("=", 1) for item in events))
     indices = probe_ends(weather, dates, val_start, 14)
-    train_days = weather.day_of_year[:val_start]
+    if climatology_for is None:
+        train_days = weather.day_of_year[:val_start]
+
+        def climatology_for(index):
+            day = weather.day_of_year[index]
+            neighbor_days = abs((train_days - day + PERIOD // 2) % PERIOD - PERIOD // 2) <= 7
+            return weather.physical[:val_start][neighbor_days].mean(axis=0)
+
     details, skill_values, rain_skill_values, ratios = [], [], [], []
     for name, date, end in zip(labels, dates, indices):
         initial = weather.physical[end - 2:end + 1]
         rollout = engine.simulate(initial, day_phase(weather.day_of_year[end]), 14)
         for lead in LEADS:
-            day = weather.day_of_year[end + lead]
-            neighbor_days = abs((train_days - day + PERIOD // 2) % PERIOD - PERIOD // 2) <= 7
-            climatology = weather.physical[:val_start][neighbor_days].mean(axis=0)
+            climatology = climatology_for(end + lead)
             truth = weather.physical[end + lead]
             prediction, persistence = rollout[lead - 1], initial[-1]
             energy = scoring.skill_vs_best_ref(prediction, truth, persistence, climatology)
@@ -111,7 +116,6 @@ def evaluate_shocks(engine, weather, stats_path, samples, val_start, dates=()):
         ends = probe_ends(weather, dates, val_start, 10)
     else:
         ends = ends[np.linspace(0, len(ends) - 1, min(samples, len(ends)), dtype=int)]
-    zeros = np.zeros(STATE_SHAPE, dtype="f4")
     results = []
     boxes = {"warm_ocean": contract.BOX_BAY_OF_BENGAL, "monsoon_stall": contract.BOX_ARABIAN_SEA}
     for end in ends:
@@ -120,12 +124,14 @@ def evaluate_shocks(engine, weather, stats_path, samples, val_start, dates=()):
         start = time.perf_counter()
         base = engine.simulate(history, phase, contract.SCORE_STEPS)
         seconds = time.perf_counter() - start
-        null = engine.simulate(history, phase, contract.SCORE_STEPS, zeros)
-        tiny = zeros.copy()
+        delta = scoring.make_shock("null", history[-1], std)
+        null = engine.simulate(history, phase, contract.SCORE_STEPS, delta)
+        tiny = delta.copy()
         tiny[0, 0, 0] = 1e-30
         tiny_result = engine.simulate(history, phase, contract.SCORE_STEPS, tiny)
         result = {"last_input_day": str(weather.dates[end]), "base_seconds": seconds,
                   "base_valid": not scoring.validity(base, contract.SCORE_STEPS),
+                  "null_consistent": bool(scoring.null_consistent(base, null, std)),
                   "zero_shock_exact": bool(np.array_equal(base, null)),
                   "subprecision_shock_exact": bool(np.array_equal(base, tiny_result)), "shocks": {}}
         for name, box in boxes.items():

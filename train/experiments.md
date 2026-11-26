@@ -346,3 +346,37 @@ fixture's second year and fit climatology and scale on the first year. The
 short partial-season fixtures exercise trainer behavior. Their losses are
 smoke diagnostics. The shipped checkpoint retained SHA-256
 `30143677fb684a5e3daa92efcc7042de174d63c2ad07d7d509da9b258899796d`.
+
+## Step 4 — E0 benchmark reference
+
+`tests/benchmark.py` rebuilds windows from the five first-target selections
+and ten shock targets recorded in `train/validation.json`. The earlier
+evaluator resolved those selections to windows. The repository records the
+selected targets and does not contain a separate event-search algorithm.
+The benchmark verifies the organizer archive by SHA-256, derives the held-out
+years from its time axis, and fits the kit's 15-day smoothed calendar-day
+climatology on the pre-holdout rows. Scoring uses `monsoon_r1_kit` 1.0.0.
+
+```powershell
+& .venv/Scripts/python.exe -B -m tests.benchmark --weights weights --label E0
+& .venv/Scripts/python.exe -B tests/benchmark.py --weights tests/_windows/calibration/reference-final/airavat.pt --label CPU-train-only
+& .venv/Scripts/python.exe -B -m tests.benchmark --weights weights/airavat.pt --label E0-repeat
+```
+
+The E0 run wrote `tests/_windows/benchmark/benchmark-E0.json` and
+`tests/_windows/benchmark/benchmark-E0.md`. The timing measures the first
+10-step call to `Engine.simulate` after checkpoint load, on four Torch CPU
+threads. It excludes HTTP. The cold rollout had no official validity errors.
+
+| Label | Forecast /45 | Day-8 skill | Anti-blur /10 | Propagation | Locality | Stability | Exact zero | Cold 10-step s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| E0 | 37.15 | -2.58% | 10.00 | 19/20 | 20/20 | 20/20 | 10/10 | 0.0393 |
+
+The E0 repeat produced the same non-timing results. The recreated train-only
+reference scored 30.95/45 and −1.94% day-8 skill with the same protocol.
+E0 differs from the archived 28.69/45 and −2.01% because the shipped
+checkpoint was trained on the full archive, including the five proxy
+windows, and the archived score came from a different, train-only checkpoint.
+On the same shipped weights, the earlier evaluator's calendar-neighbor
+climatology gave 37.63/45 and −2.01%. The kit climatology alone moved that
+replay to 37.15/45 and −2.58%. The archived train-only weights were unavailable.
