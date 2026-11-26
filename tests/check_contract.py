@@ -148,8 +148,8 @@ def main():
              ("missing doy_sincos", {k: v for k, v in payload.items() if k != "doy_sincos"})]
     for key, values in (
         ("init_states", [[], "bad", None, [[1], [2, 3]]]),
-        ("doy_sincos", [[], [0], [0, 1, 2], ["bad", 1], [float("inf"), 0]]),
-        ("steps", [0, -1, 31, 1.5, True, "10", None, float("nan"), float("inf")]),
+        ("doy_sincos", [[], [0], [0, 1, 2], ["bad", 1], [float("inf"), 0], [0, 0]]),
+        ("steps", [0, -1, 15, 31, 1.5, True, "10", None, float("nan"), float("inf")]),
         ("perturbation", [[], "bad", [[[0]]], {"bad": 1}]),
     ):
         for index, value in enumerate(values):

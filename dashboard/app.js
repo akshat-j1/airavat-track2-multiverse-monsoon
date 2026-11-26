@@ -15,7 +15,7 @@
   function settings() {
     const doy = Number($('doy').value), steps = Number($('steps').value), radius = Number($('radius').value), magnitude = Number($('magnitude').value);
     if (!$('doy').value || !Number.isInteger(doy) || doy < 1 || doy > 366) throw new Error('Day of year must be an integer from 1 to 366.');
-    if (!$('steps').value || !Number.isInteger(steps) || steps < 1 || steps > 30) throw new Error('Forecast days must be an integer from 1 to 30.');
+    if (!$('steps').value || !Number.isInteger(steps) || steps < 1 || steps > 14) throw new Error('Forecast days must be an integer from 1 to 14.');
     if (!$('radius').value || !Number.isFinite(radius) || radius < 1 || radius > 12) throw new Error('Radius must be between 1 and 12 cells.');
     if (!$('magnitude').value || !Number.isFinite(magnitude) || Math.abs(magnitude) > 10000) throw new Error('Magnitude must be finite and between −10000 and 10000.');
     return {doy, steps, radius, magnitude, channel: Number($('shock-channel').value)};
@@ -135,7 +135,7 @@
       setBusy(true);
       try {
         const parsed = M.parseWindow(JSON.parse(await file.text())); state.init = parsed.init; state.doyOverride = parsed.doy || null;
-        if (parsed.doy) {const angle = Math.atan2(parsed.doy[0], parsed.doy[1]); $('doy').value = Math.max(1, Math.round((angle < 0 ? angle + 2 * Math.PI : angle) * 365.25 / (2 * Math.PI)));}
+        if (parsed.doy) {const angle = Math.atan2(parsed.doy[0], parsed.doy[1]); $('doy').value = Math.max(1, Math.round((angle < 0 ? angle + 2 * Math.PI : angle) * 365 / (2 * Math.PI)));}
         $('window-info').textContent = `${file.name} · 3 input days`; invalidate();
       } catch (error) {status(`Upload rejected: ${error.message}`, true);}
       finally {setBusy(false);}

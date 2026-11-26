@@ -20,6 +20,9 @@ os.environ.setdefault("MKL_NUM_THREADS", "4")
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/mpl")
 
 import argparse  # noqa: E402
+import base64  # noqa: E402
+import binascii  # noqa: E402
+import math  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 import traceback  # noqa: E402
@@ -35,7 +38,7 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 N_IN, N_CH, H, W = 3, 6, 32, 36
-MAX_STEPS = 30
+MAX_STEPS = 14  # official monsoon_r1.contract.MAX_STEPS; no kit needed at runtime
 STRICT = os.environ.get("MONSOON_STRICT") == "1"
 
 
@@ -109,42 +112,50 @@ def _bad(msg):
     raise HTTPException(status_code=400, detail=msg)
 
 
+def _array(value, shape, name):
+    """Accept canonical lists and the official validator's optional base64 form."""
+    try:
+        if isinstance(value, dict):
+            if value.get("shape") != list(shape) or not isinstance(value.get("b64"), str):
+                _bad(f"{name} base64 object must have shape {list(shape)}")
+            expected = math.prod(shape) * 4
+            if len(value["b64"]) != 4 * ((expected + 2) // 3):
+                _bad(f"{name} base64 length does not match shape")
+            raw = base64.b64decode(value["b64"], validate=True)
+            if len(raw) != expected:
+                _bad(f"{name} base64 length does not match shape")
+            result = np.frombuffer(raw, dtype="<f4").reshape(shape)
+        else:
+            result = np.asarray(value, dtype=np.float32)
+    except (ValueError, TypeError, OverflowError, binascii.Error):
+        _bad(f"{name} must be numeric lists or a valid base64 array")
+    if result.shape != shape or not np.isfinite(result).all():
+        _bad(f"{name} must be finite with shape {list(shape)}")
+    return result
+
+
 def parse_request(body):
     if not isinstance(body, dict):
         _bad("body must be a JSON object")
-    try:
-        init = np.asarray(body["init_states"], dtype=np.float32)
-    except (KeyError, ValueError, TypeError):
-        _bad("init_states missing or not a numeric array")
-    if init.shape != (N_IN, N_CH, H, W):
-        _bad("init_states must have shape [3, 6, 32, 36], got %s" % (list(init.shape),))
-    if not np.isfinite(init).all():
-        _bad("init_states contains NaN/Inf")
-
-    try:
-        doy = np.asarray(body["doy_sincos"], dtype=np.float32)
-    except (KeyError, ValueError, TypeError):
-        _bad("doy_sincos missing or not numeric")
-    if doy.shape != (2,) or not np.isfinite(doy).all():
-        _bad("doy_sincos must be [sin, cos]")
+    if "init_states" not in body or "doy_sincos" not in body:
+        _bad("init_states and doy_sincos are required")
+    init = _array(body["init_states"], (N_IN, N_CH, H, W), "init_states")
+    doy = _array(body["doy_sincos"], (2,), "doy_sincos")
+    if not 0.9 <= float(np.linalg.norm(doy)) <= 1.1:
+        _bad("doy_sincos must describe a unit-circle angle")
 
     steps = body.get("steps", 10)
-    if isinstance(steps, bool) or not isinstance(steps, (int, float)) or int(steps) != steps:
+    if isinstance(steps, bool) or not isinstance(steps, (int, float)):
         _bad("steps must be an integer")
-    steps = int(steps)
+    if isinstance(steps, float) and (not math.isfinite(steps) or not steps.is_integer()):
+        _bad("steps must be an integer")
     if not 1 <= steps <= MAX_STEPS:
         _bad("steps must be between 1 and %d" % MAX_STEPS)
+    steps = int(steps)
 
     pert = body.get("perturbation")
     if pert is not None:
-        try:
-            pert = np.asarray(pert, dtype=np.float32)
-        except (ValueError, TypeError):
-            _bad("perturbation must be numeric")
-        if pert.shape != (N_CH, H, W):
-            _bad("perturbation must have shape [6, 32, 36] or be null")
-        if not np.isfinite(pert).all():
-            _bad("perturbation contains NaN/Inf")
+        pert = _array(pert, (N_CH, H, W), "perturbation")
     return init, doy, steps, pert
 
 

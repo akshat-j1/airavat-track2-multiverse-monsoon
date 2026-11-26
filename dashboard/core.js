@@ -21,7 +21,7 @@
     return {lat, lon, mask: mask || null, orography: data.orography_m || null};
   }
   function fallbackGrid() {
-    return normalizeGrid({lat: Array.from({length: H}, (_, r) => 36 - r), lon: Array.from({length: W}, (_, c) => 60 + c)});
+    return normalizeGrid({lat: Array.from({length: H}, (_, r) => 6.5 + r), lon: Array.from({length: W}, (_, c) => 65.5 + c)});
   }
   async function loadGrid() {
     try {
@@ -29,10 +29,10 @@
       if (!response.ok) throw new Error(`grid.json HTTP ${response.status}`);
       return {...normalizeGrid(await response.json()), source: 'Dataset grid · coastline from land mask'};
     } catch (error) {
-      return {...fallbackGrid(), source: 'Fallback grid · 5–36°N, 60–95°E · no coastline', warning: error.message};
+      return {...fallbackGrid(), source: 'Contract grid · 6.5–37.5°N, 65.5–100.5°E · no coastline', warning: error.message};
     }
   }
-  const seasonal = day => [Math.sin(2 * Math.PI * day / 365.25), Math.cos(2 * Math.PI * day / 365.25)];
+  const seasonal = day => [Math.sin(2 * Math.PI * day / 365), Math.cos(2 * Math.PI * day / 365)];
   function demoWindow(grid) {
     return Array.from({length: 3}, (_, day) => Array.from({length: 6}, (_, channel) => matrix((r, c) => {
       const lat = grid.lat[r][c], lon = grid.lon[r][c];

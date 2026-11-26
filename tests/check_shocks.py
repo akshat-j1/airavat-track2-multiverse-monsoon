@@ -4,8 +4,8 @@
 Usage: python tests/check_shocks.py --url http://localhost:8000 --window window.npz
 Window formats and --require-real match check_contract.py. Optional window keys
 lat (32,) and lon (36,), or both (32,36), locate the nearest ocean centres.
-Without coordinates, assume rows run north-to-south from 36 to 5 degrees N and
-columns west-to-east from 60 to 95 degrees E. Bay centre: 16N,88E; Arabian: 16N,66E.
+Without coordinates, use the CONTRACT.md grid: rows south-to-north from 6.5 to
+37.5 degrees N; columns from 65.5 to 100.5 degrees E. Bay: 16N,88E; Arabian: 16N,70E.
 Radius is 4.5 cells. Energy is the sum of squared response over all six channels;
 footprint is the number of cells containing 90% of energy, and mean distance is
 energy-weighted distance to the shock centre. All comparisons use shocked minus
@@ -18,8 +18,8 @@ from check_contract import Checks, arguments, forecast, health, load_window
 
 
 def centre(metadata, latitude, longitude):
-    lat = np.asarray(metadata.get("lat", np.linspace(36., 5., 32)), dtype=float)
-    lon = np.asarray(metadata.get("lon", np.linspace(60., 95., 36)), dtype=float)
+    lat = np.asarray(metadata.get("lat", np.arange(6.5, 38.5)), dtype=float)
+    lon = np.asarray(metadata.get("lon", np.arange(65.5, 101.5)), dtype=float)
     if lat.shape == (32,) and lon.shape == (36,):
         lat, lon = np.meshgrid(lat, lon, indexing="ij")
     if lat.shape != (32, 36) or lon.shape != (32, 36):
@@ -60,7 +60,7 @@ def main():
     radius = 4.5
     for label, channel, amplitude, latitude, longitude in (
         ("warm Bay of Bengal", 0, 2., 16., 88.),
-        ("weaker Arabian Sea wind", 2, -3., 16., 66.),
+        ("weaker Arabian Sea wind", 2, -3., 16., 70.),
     ):
         try:
             row, column = centre(metadata, latitude, longitude)
