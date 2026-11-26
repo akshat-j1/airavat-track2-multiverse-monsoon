@@ -189,24 +189,28 @@ def parse_request(body):
     return init.astype(np.float32, copy=False), phase, steps, pert
 
 
-async def _discard_rejected_body(request):
+async def _discard_rejected_body(request, remaining):
     """Consume an already-sent upload without storing it or waiting indefinitely."""
-    received = 0
-    while received < MAX_BODY_BYTES:
+    while remaining > 0:
         message = await request.receive()
-        if message["type"] == "http.disconnect" or not message.get("more_body", False):
+        size = len(message.get("body", b""))
+        if size > remaining or message["type"] == "http.disconnect" or not message.get("more_body", False):
             return
-        received += len(message.get("body", b""))
+        remaining -= size
 
 
 async def _read_json(request):
     media_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
     if media_type != "application/json" and not (media_type.startswith("application/") and media_type.endswith("+json")):
-        # Closing with unread upload bytes can reset the client's 415 response.
-        # A client waiting for 100 Continue has not been asked to send its body.
-        if request.headers.get("expect", "").strip().lower() != "100-continue":
+        # ASGI delivers whole chunks. Only drain when HTTP framing guarantees a bounded body.
+        length = request.headers.get("content-length", "").lstrip("0")
+        sized = length.isascii() and length.isdecimal() and len(length) <= len(str(MAX_BODY_BYTES))
+        budget = int(length) if sized else 0
+        if (0 < budget <= MAX_BODY_BYTES and "transfer-encoding" not in request.headers
+                and request.headers.get("expect", "").strip().lower() != "100-continue"):
             try:
-                await asyncio.wait_for(_discard_rejected_body(request), timeout=REJECTED_BODY_DRAIN_TIMEOUT_SECONDS)
+                await asyncio.wait_for(_discard_rejected_body(request, budget),
+                                       timeout=REJECTED_BODY_DRAIN_TIMEOUT_SECONDS)
             except asyncio.TimeoutError:
                 pass
         raise HTTPException(status_code=415, detail="Content-Type must be application/json")
