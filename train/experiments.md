@@ -414,3 +414,169 @@ under the shared extended training dataset and seed.
 | E0 shipped | 2005–2021 | 37.15 | 10.29% | 26.79% / 2.36% / −2.58% | 19/20 / 20/20 / 20/20 / 10/10 | 39.3 ms |
 | E1 | 1979–2019 | — | — | — | — | — |
 | E2 | 2005–2019 | — | — | — | — | — |
+
+## Step 6 — Prepare the capacity and loss sweep
+
+The extended archive is still absent (`Test-Path -LiteralPath data/r1/india_climate_1979_2021.nc`
+returned `False`). E1 and E2 have no result, so the winning data setup,
+trained width sweep, candidate ranking, and three-fold confirmation are
+pending. The shipped checkpoint remains unchanged.
+
+The trainer now supports opt-in scheduled sampling for unpaired windows, the
+existing event-weighted term, soft CSI at the BCE rain threshold, and a
+spatial gradient-energy term. The paired-shock and far-field terms retain
+their original formulas. A common validation horizon and proxy exclusion
+keep screening losses comparable. The 0.1 loss weights below are smoke
+inputs. No hyperparameter tuning was performed.
+
+### Smoke commands
+
+```powershell
+$env:OMP_NUM_THREADS = '4'
+$env:MKL_NUM_THREADS = '4'
+@'
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+import numpy as np
+import torch
+import xarray as xr
+from engine.engine import Engine
+from monsoon_r1 import scoring
+from train.common import day_phase, exclude_proxy_windows, load_weather, recorded_proxy_cases, validation_start, window_ends
+from train.train import rain_spatial_energy_loss, scheduled_history, soft_csi_loss
+
+root = Path("tests/_windows")
+fixture = root / "trainer-smoke/fixture.nc"
+base = [sys.executable, "-B", "-m", "train.train", str(fixture), "--device", "cpu",
+        "--threads", "4", "--width", "4", "--batch-size", "32", "--split", "train", "--val-years", "1", "--seed", "35"]
+out = root / "rollout-smoke/airavat.pt"
+command = [*base, "--output", str(out), "--curriculum", "2,8,10", "--scheduled-sampling",
+           "--event-rain-weight", "0.1", "--rain-csi-weight", "0.1", "--rain-energy-weight", "0.1",
+           "--validation-steps", "10", "--exclude-proxy-windows"]
+print(subprocess.list2cmdline(command), flush=True)
+subprocess.run(command, check=True)
+history = json.loads(out.with_suffix(".loss.json").read_text())
+assert [epoch["train_horizon"] for epoch in history["epochs"]] == [2, 8, 10]
+assert [epoch["teacher_forcing"] for epoch in history["epochs"]] == [0.5, 0.25, 0.0]
+assert all(epoch["validation_horizon"] == 10 and np.isfinite(epoch["val_loss"]) for epoch in history["epochs"])
+weather = load_weather(fixture)
+engine = Engine(out.parent)
+assert not scoring.validity(engine.simulate(weather.physical[:3], day_phase(weather.day_of_year[2]), 10), 10)
+print("Scheduled 2/8/10 smoke PASS", [(e["train_loss"], e["val_loss"]) for e in history["epochs"]], flush=True)
+
+paired = torch.arange(6 * 3 * 4, dtype=torch.float32).reshape(6, 3, 1, 2, 2)
+actual = torch.zeros(4, 1, 2, 2)
+rng = torch.Generator().manual_seed(35)
+mixed = scheduled_history(paired, actual, 2, 1.0, rng)
+assert torch.equal(mixed[[0, 1, 4, 5]], paired[[0, 1, 4, 5]])
+assert torch.equal(mixed[:, :-1], paired[:, :-1]) and torch.equal(mixed[2:4, -1], actual[2:])
+truth = torch.tensor([[[0.0, 14.0], [16.0, 0.0]]]).log1p()
+candidate = torch.tensor([[[1.0, 5.0], [8.0, 3.0]]]).log1p().requires_grad_()
+heavy = (truth > np.log1p(scoring.RAIN_THRESH)).float()
+csi = soft_csi_loss(3 * (candidate - np.log1p(scoring.RAIN_THRESH)), heavy)
+energy = rain_spatial_energy_loss(candidate, truth)
+assert csi > soft_csi_loss(3 * (truth - np.log1p(scoring.RAIN_THRESH)), heavy)
+assert energy > rain_spatial_energy_loss(truth, truth) == 0
+(csi + energy).backward()
+assert torch.isfinite(candidate.grad).all() and candidate.grad.abs().sum() > 0
+print("Paired-state preservation and rain loss gradients PASS", float(csi.detach()), float(energy.detach()), flush=True)
+
+with xr.open_dataset(root / "india_climate_train.nc") as archive:
+    dates = archive.time.values.astype("datetime64[D]")
+cut = validation_start(dates, 2)
+audit = json.loads(Path("train/validation.json").read_text(encoding="utf8"))["release_candidate_audit"]
+starts = [date for _, date in recorded_proxy_cases(audit)]
+for horizon in (8, 10):
+    windows = window_ends(len(dates), horizon, "validation", val_start=cut)
+    kept = exclude_proxy_windows(dates, windows, horizon, starts)
+    for idx in np.searchsorted(dates, np.asarray(starts, dtype="datetime64[D]")):
+        assert ((kept + horizon < idx - 3) | (kept - 2 > idx + 13)).all()
+    if horizon == 8:
+        assert (len(windows), len(kept)) == (721, 592)
+    print("Proxy exclusion PASS", horizon, len(windows), len(kept), flush=True)
+
+legacy = root / "rollout-legacy/airavat.pt"
+subprocess.run([*base, "--clim-years", "2005", "2005", "--sample-weight-recent",
+                "--curriculum", "1,2,2", "--max-epochs", "2", "--output", str(legacy)], check=True)
+log = json.loads(legacy.with_suffix(".loss.json").read_text())
+assert log["epochs"][0]["train_loss"] == 0.6302236969937983
+assert log["epochs"][0]["val_loss"] == 7985.680989583333
+print("Previous defaults reproduced epoch 1 exactly", log["epochs"][0], flush=True)
+'@ | & .venv/Scripts/python.exe -B -
+```
+
+```text
+Scheduled 2/8/10 smoke PASS [(0.9771703084309896, 47386.09375), (1.4254299587673611, 45693.38352272727), (1.5782018141313032, 43075.83238636364)]
+Paired-state preservation and rain loss gradients PASS 0.7594814896583557 1.7446913719177246
+Proxy exclusion PASS 8 721 592
+Proxy exclusion PASS 10 719 585
+Previous defaults reproduced epoch 1 exactly {'epoch': 1, 'train_horizon': 1, 'train_loss': 0.6302236969937983, 'teacher_forcing': 0.0, 'validation_horizon': 2, 'val_loss': 7985.680989583333}
+```
+
+### Capacity probes
+
+Each probe times one first 10-step engine call on a real fixture in a fresh
+process with four Torch CPU threads. Width 16 uses shipped weights. The
+wider probes use seeded random network tensors and the shipped static and
+normalization tensors. These probes measure capacity and direct CPU
+inference. Candidate quality and the cold-server latency gate are pending.
+
+```powershell
+$env:OMP_NUM_THREADS = '4'
+$env:MKL_NUM_THREADS = '4'
+@'
+from pathlib import Path
+import subprocess
+import sys
+
+program = """
+from pathlib import Path
+import sys
+import time
+
+import numpy as np
+import torch
+from engine.engine import Engine
+from model.unet import AnomalyUNet
+from monsoon_r1 import scoring
+
+torch.set_num_threads(4)
+torch.manual_seed(42)
+width = int(sys.argv[1])
+weights = Path("weights/airavat.pt")
+package = torch.load(weights, map_location="cpu", weights_only=True)
+if width != package["width"]:
+    package.update(width=width, model=AnomalyUNet(width).state_dict())
+    weights = Path("tests/_windows/width-probe") / str(width) / "airavat.pt"
+    weights.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(package, weights)
+with np.load("tests/_windows/real.npz", allow_pickle=False) as fixture:
+    history, phase = fixture["init_states"], fixture["doy_sincos"]
+engine = Engine(weights.parent)
+start = time.perf_counter()
+out = engine.simulate(history, phase, 10)
+elapsed = time.perf_counter() - start
+assert not scoring.validity(out, 10)
+print(width, sum(v.numel() for v in package["model"].values()), weights.stat().st_size, round(elapsed * 1000, 2))
+"""
+print("width parameters checkpoint_bytes cold_engine_ms", flush=True)
+for width in (16, 24, 32, 48):
+    subprocess.run([sys.executable, "-B", "-c", program, str(width)], check=True)
+'@ | & .venv/Scripts/python.exe -B -
+& .venv/Scripts/python.exe -B -m tests.benchmark --weights weights --label E0-capacity
+```
+
+| Width | Network | Parameters | Checkpoint bytes | Cold 10-step engine |
+|---:|---|---:|---:|---:|
+| 16 | Shipped | 32,342 | 344,546 | 35.53 ms |
+| 24 | Untrained probe | 69,246 | 492,078 | 83.94 ms |
+| 32 | Untrained probe | 119,974 | 695,342 | 49.69 ms |
+| 48 | Untrained probe | 262,902 | 1,267,054 | 74.43 ms |
+
+The updated E0 benchmark emitted `16 | 32342 | 344546 | 37.15 | -2.58%` for
+width, parameters, bytes, forecast points, and day-8 skill. Its first
+10-step engine call took 0.0370 s. The forecast and shock fields matched the
+previous E0 JSON.

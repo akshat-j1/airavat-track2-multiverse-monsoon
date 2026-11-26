@@ -39,6 +39,27 @@ the selected epoch. Use the same `--seed`, backend, thread count, and software
 versions for reproducible runs. MPS reports warnings for operations where
 PyTorch cannot guarantee determinism.
 
+### Screen rollout and rain-loss settings
+
+Use `--curriculum` to reach 8 or 10 rollout steps. With
+`--scheduled-sampling`, unpaired training windows start with a 50% chance
+of receiving the observed state between steps. That chance falls linearly
+to zero by the final epoch. Both members of each paired-shock window always
+use their model predictions. The paired-shock and far-field penalties use
+the existing objective.
+
+`--event-rain-weight` enables the existing event-weighted rain loss.
+`--rain-csi-weight` adds a differentiable overlap loss at the 10 mm/day
+threshold alongside BCE. `--rain-energy-weight` matches log spatial
+gradient energy in physical rain units. All three default to zero.
+
+For tuning, use the same `--validation-steps` and
+`--exclude-proxy-windows` across candidates. This removes validation
+windows that share any inputs or targets with the five recorded proxies
+and uses the base training objective as the comparison loss. Validation
+always uses model predictions without augmentation. Run the official
+benchmark with the frozen candidates after selection.
+
 ## Reproduce the shipped checkpoint
 
 The retained 15-epoch checkpoint was trained on the organizer archive with SHA-256

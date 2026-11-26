@@ -22,7 +22,7 @@ from monsoon_r1 import contract, scoring, stats
 
 from engine.engine import CHECKPOINT_NAME, Engine
 from tests.eval_skill import evaluate_events, evaluate_shocks, probe_ends
-from train.common import LEADS, day_phase, load_weather, validation_start
+from train.common import LEADS, day_phase, load_weather, recorded_proxy_cases, validation_start
 
 
 ARCHIVE_SHA256 = "f37bdbd0bd44e6fe951adf36c9a08620075f9d17de391b04c97d61f06797903b"
@@ -54,7 +54,7 @@ def benchmark(dataset, checkpoint, label):
         raise ValueError("Use the original organizer archive for a comparable benchmark")
     audit = json.loads((ROOT / "train" / "validation.json").read_text(encoding="utf-8"))["release_candidate_audit"]
     # The prior audit records first-target selections. Keep those same five cases.
-    cases = list(dict.fromkeys(f'{row["event"]}={row["first_target"]}' for row in audit["event_forecast"]["events"]))
+    cases = [f"{event}={date}" for event, date in recorded_proxy_cases(audit)]
     shock_dates = audit["shock_first_target_dates"]
     if len(cases) != 5 or len(set(shock_dates)) != 10 or len(shock_dates) != 10:
         raise ValueError("The archived protocol must contain five proxies and ten distinct shock targets")
@@ -88,6 +88,8 @@ def benchmark(dataset, checkpoint, label):
         "checkpoint": {
             "sha256": sha256(checkpoint),
             "bytes": checkpoint.stat().st_size,
+            "width": package["width"],
+            "network_parameters": sum(tensor.numel() for tensor in package["model"].values()),
             "format_version": package["format_version"],
             "split": package.get("split"),
             "fit_period": package.get("fit_period"),
@@ -127,12 +129,14 @@ def benchmark(dataset, checkpoint, label):
 
 def markdown(result):
     forecast, shocks = result["forecast"], result["shocks"]
+    checkpoint = result["checkpoint"]
     label = " ".join(result["label"].split()).replace("|", "&#124;")
     day8 = forecast["mean_skill_vs_best_by_lead"][-1]
     return (
-        "| Label | Forecast /45 | Day-8 skill | Anti-blur /10 | Propagation | Locality | Stability | Exact zero | Cold 10-step s |\n"
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|\n"
-        f"| {label} | {forecast['points']:.2f} | {day8:.2%} | {forecast['anti_blur_points']:.2f} | "
+        "| Label | Width | Parameters | Bytes | Forecast /45 | Day-8 skill | Anti-blur /10 | Propagation | Locality | Stability | Exact zero | Cold 10-step s |\n"
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n"
+        f"| {label} | {checkpoint['width']} | {checkpoint['network_parameters']} | {checkpoint['bytes']} | "
+        f"{forecast['points']:.2f} | {day8:.2%} | {forecast['anti_blur_points']:.2f} | "
         f"{shocks['propagation']}/{shocks['response_count']} | {shocks['locality']}/{shocks['response_count']} | "
         f"{shocks['stability']}/{shocks['response_count']} | {shocks['zero_exact']}/{shocks['window_count']} | "
         f"{result['timing']['cold_engine_simulate_s']:.4f} |\n"

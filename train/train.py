@@ -14,8 +14,8 @@ from torch.nn import functional as F
 
 from model.unet import CHANNELS, LAT, RAIN, AnomalyUNet, encode_physical, forecast_step, static_features
 from train.common import (
-    DEFAULT_VAL_YEARS, PERIOD, day_phase, fit_climatology, load_weather,
-    seasonal_fields, time_block_split, validation_start, window_ends,
+    DEFAULT_VAL_YEARS, PERIOD, day_phase, exclude_proxy_windows, fit_climatology, load_weather,
+    recorded_proxy_cases, seasonal_fields, time_block_split, validation_start, window_ends,
 )
 
 DEFAULT_CURRICULUM = "1,1,1,2,2,3,4,4,6,8,8"
@@ -67,8 +67,35 @@ def rain_event_loss(predicted, observed):
     return 0.45 * intensity + 0.10 * peaks + 0.20 * (row_energy + column_energy)
 
 
+def soft_csi_loss(logits, heavy):
+    probability = logits.sigmoid()
+    intersection = (probability * heavy).sum(dim=(-2, -1))
+    union = (probability + heavy).sum(dim=(-2, -1)) - intersection
+    return 1 - (intersection / union.clamp_min(1e-6)).mean()
+
+
+def rain_spatial_energy_loss(predicted, observed):
+    def log_energy(encoded):
+        rain = encoded.expm1()
+        return sum(rain.diff(dim=dim).square().mean(dim=(-2, -1)) for dim in (-2, -1)).log1p()
+
+    return F.smooth_l1_loss(log_energy(predicted), log_energy(observed))
+
+
+def scheduled_history(history, observed_anomaly, paired_count, probability, rng):
+    """Mix in observations for unpaired clean windows only."""
+    clean_count = len(observed_anomaly)
+    eligible = slice(paired_count, clean_count)
+    use_observed = torch.rand((clean_count - paired_count, 1, 1, 1), generator=rng)
+    use_observed = use_observed.to(history.device) < probability
+    latest = torch.where(use_observed, observed_anomaly[eligible], history[eligible, -1])
+    latest = torch.cat((history[:paired_count, -1], latest, history[clean_count:, -1]))
+    return torch.cat((history[:, :-1], latest[:, None]), dim=1)
+
+
 def rollout_loss(model, weather, doy, phase, climate, ends, horizon, scale, features, latitude_weight,
-                 augment, far_field_weight, event_rain_weight):
+                 augment, far_field_weight, event_rain_weight, *,
+                 rain_csi_weight=0.0, rain_energy_weight=0.0, teacher_forcing=0.0, sampling_rng=None):
     history_idx = ends[:, None] + torch.arange(-2, 1, device=ends.device)
     history = (weather[history_idx] - climate[doy[history_idx]]) / scale
     clean_count = len(ends)
@@ -114,6 +141,13 @@ def rollout_loss(model, weather, doy, phase, climate, ends, horizon, scale, feat
         loss = loss + error + 0.13 * rain_loss + 0.16 * variance_loss + 0.09 * rain_variance_loss + paired_loss
         if event_rain_weight:
             loss = loss + event_rain_weight * rain_event_loss(predicted_rain, rain)
+        if rain_csi_weight:
+            loss = loss + rain_csi_weight * soft_csi_loss(logits, heavy)
+        if rain_energy_weight:
+            loss = loss + rain_energy_weight * rain_spatial_energy_loss(predicted_rain, rain)
+        if teacher_forcing and lead < horizon and clean_count > shock_count:
+            observed_anomaly = (target - climate[doy[target_idx]]) / scale
+            history = scheduled_history(history, observed_anomaly, shock_count, teacher_forcing, sampling_rng)
     return loss / horizon
 
 
@@ -191,6 +225,13 @@ def main():
                         help="Penalty on day-one shock energy outside the perturbed neighborhood")
     parser.add_argument("--event-rain-weight", type=float, default=0,
                         help="Weight for the fine-tuning loss on rain intensity, peaks and gradients")
+    parser.add_argument("--rain-csi-weight", type=float, default=0, help="Weight for the soft heavy-rain CSI loss")
+    parser.add_argument("--rain-energy-weight", type=float, default=0, help="Weight for rain spatial gradient energy")
+    parser.add_argument("--scheduled-sampling", action="store_true",
+                        help="Anneal observation feedback from 50%% to zero in unpaired training windows")
+    parser.add_argument("--validation-steps", type=int, help="Use a common held-out rollout horizon across runs")
+    parser.add_argument("--exclude-proxy-windows", action="store_true",
+                        help="Reserve the five benchmark proxies and use the base loss for validation")
     parser.add_argument("--resume", type=Path, help="Initialize the network from an earlier checkpoint")
     args = parser.parse_args()
     try:
@@ -203,14 +244,19 @@ def main():
         parser.error("Batch size, thread count, and learning rate must be positive")
     if args.val_years < 1 or not math.isfinite(args.far_field_weight) or args.far_field_weight < 0:
         parser.error("Validation years must be positive and far-field weight must be finite and nonnegative")
-    if not math.isfinite(args.event_rain_weight) or args.event_rain_weight < 0:
-        parser.error("Event rain weight must be finite and nonnegative")
+    for weight in (args.event_rain_weight, args.rain_csi_weight, args.rain_energy_weight):
+        if not math.isfinite(weight) or weight < 0:
+            parser.error("Rain loss weights must be finite and nonnegative")
     if args.max_epochs is not None:
         if args.max_epochs < 1:
             parser.error("--max-epochs must be positive")
         horizons = horizons[:args.max_epochs]
     if args.folds is not None and args.split == "all":
         parser.error("--folds requires a held-out split")
+    if args.validation_steps is not None and not 1 <= args.validation_steps <= 14:
+        parser.error("--validation-steps must be between 1 and 14")
+    if args.split == "all" and (args.validation_steps is not None or args.exclude_proxy_windows):
+        parser.error("Validation controls require a held-out split")
     if not 0 <= args.seed < 2**64:
         parser.error("--seed must be an unsigned 64-bit integer")
 
@@ -223,6 +269,7 @@ def main():
     torch.use_deterministic_algorithms(True, warn_only=device.type == "mps")
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
+    sampling_rng = torch.Generator().manual_seed(args.seed) if args.scheduled_sampling else None
 
     data = load_weather(args.dataset)
     record_count = len(data.dates)
@@ -256,6 +303,10 @@ def main():
         "sample_weight_recent": args.sample_weight_recent,
         "far_field_weight": args.far_field_weight,
         "event_rain_weight": args.event_rain_weight,
+        "rain_csi_weight": args.rain_csi_weight,
+        "rain_energy_weight": args.rain_energy_weight,
+        "scheduled_sampling": args.scheduled_sampling,
+        "exclude_proxy_windows": args.exclude_proxy_windows,
         "seed": args.seed,
         "curriculum": horizons,
         "learning_rate": args.learning_rate,
@@ -268,13 +319,26 @@ def main():
     for steps, ends in windows.items():
         if not len(ends):
             parser.error(f"No complete {steps}-day training windows")
-    validation_horizon = max(horizons)
+    validation_horizon = args.validation_steps or max(horizons)
     validation_batches = ()
+    validation_count = 0
     if validation is not None:
-        validation_horizon = min(validation_horizon, validation.stop - validation.start - 3)
+        max_validation_horizon = validation.stop - validation.start - 3
+        if args.validation_steps is not None and validation_horizon > max_validation_horizon:
+            parser.error("--validation-steps exceeds the available validation window length")
+        validation_horizon = min(validation_horizon, max_validation_horizon)
         if validation_horizon < 1:
             parser.error("The validation partition needs at least three input days and one target day")
         validation_ends = window_ends(validation.stop - validation.start, validation_horizon, "all") + validation.start
+        if args.exclude_proxy_windows:
+            audit_path = Path(__file__).with_name("validation.json")
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))["release_candidate_audit"]
+            validation_ends = exclude_proxy_windows(
+                data.dates, validation_ends, validation_horizon, [date for _, date in recorded_proxy_cases(audit)]
+            )
+        validation_count = len(validation_ends)
+        if not validation_count:
+            parser.error("No complete validation windows remain")
         validation_batches = torch.as_tensor(validation_ends, device=device).split(args.batch_size)
 
     fit_rows = climate_parts[0] if len(climate_parts) == 1 else np.concatenate(
@@ -312,21 +376,27 @@ def main():
         completed_epochs = package["epochs"]
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.0001)
     loss_path = args.output.with_suffix(".loss.json")
-    history = {"checkpoint_epoch": None, "stopped_early": False, "epochs": []}
+    history = {"checkpoint_epoch": None, "stopped_early": False, "validation_windows": validation_count, "epochs": []}
     best_loss, stale_epochs = math.inf, 0
     print(f"Device={device}, fit={fit_metadata['fit_period']}, split={fit_metadata['split']}, "
           f"rollout curriculum={horizons}, far-field weight={args.far_field_weight:g}", flush=True)
+    validation_event_weight = 0.0 if args.exclude_proxy_windows else args.event_rain_weight
     for epoch, horizon in enumerate(horizons, start=1):
         start = time.monotonic()
         model.train()
         ends = training_order(windows[horizon], years, rng, args.sample_weight_recent)
         batches = torch.as_tensor(ends, device=device).split(args.batch_size)
+        teacher_forcing = 0.0
+        if args.scheduled_sampling and len(horizons) > 1:
+            teacher_forcing = 0.5 * (len(horizons) - epoch) / (len(horizons) - 1)
         loss_total = torch.zeros((), device=device)
         for batch in batches:
             optimizer.zero_grad(set_to_none=True)
             loss = rollout_loss(model, weather, day_idx, phase, climate, batch, horizon,
                                 scale, features, latitude_weight, augment=epoch > 1 or args.resume is not None,
-                                far_field_weight=args.far_field_weight, event_rain_weight=args.event_rain_weight)
+                                far_field_weight=args.far_field_weight, event_rain_weight=args.event_rain_weight,
+                                rain_csi_weight=args.rain_csi_weight, rain_energy_weight=args.rain_energy_weight,
+                                teacher_forcing=teacher_forcing, sampling_rng=sampling_rng)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 2)
             optimizer.step()
@@ -342,9 +412,9 @@ def main():
                 for batch in validation_batches:
                     loss = rollout_loss(model, weather, day_idx, phase, climate, batch, validation_horizon,
                                         scale, features, latitude_weight, augment=False,
-                                        far_field_weight=args.far_field_weight, event_rain_weight=args.event_rain_weight)
+                                        far_field_weight=args.far_field_weight, event_rain_weight=validation_event_weight)
                     val_total += loss * len(batch)
-                val_loss = float(val_total.cpu()) / len(validation_ends)
+                val_loss = float(val_total.cpu()) / validation_count
             if not math.isfinite(val_loss):
                 raise RuntimeError("Non-finite validation loss")
         current_epoch = completed_epochs + epoch
@@ -358,6 +428,7 @@ def main():
             stale_epochs += 1
         history["stopped_early"] = stale_epochs >= EARLY_STOP_PATIENCE and epoch < len(horizons)
         history["epochs"].append({"epoch": current_epoch, "train_horizon": horizon, "train_loss": average,
+                                  "teacher_forcing": teacher_forcing,
                                   "validation_horizon": validation_horizon if validation_batches else None,
                                   "val_loss": val_loss})
         write_atomically(loss_path, lambda pending: pending.write_text(

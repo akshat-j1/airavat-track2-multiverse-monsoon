@@ -13,6 +13,7 @@ LEADS = (1, 4, 8)
 PERIOD = 365
 HARMONICS = 3
 FOLD_BUFFER_DAYS = 14
+PROXY_ROLLOUT_STEPS = 14
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,23 @@ def time_block_split(dates, start_year, end_year):
     train = tuple(part for part in (slice(0, train_stop), slice(train_start, len(dates)))
                   if part.start < part.stop)
     return train, slice(start, stop)
+
+
+def recorded_proxy_cases(audit):
+    """Return the original event selections in benchmark order."""
+    return list(dict.fromkeys((row["event"], row["first_target"]) for row in audit["event_forecast"]["events"]))
+
+
+def exclude_proxy_windows(dates, ends, steps, first_targets):
+    """Discard loss windows sharing any input or forecast row with a proxy."""
+    targets = np.asarray(first_targets, dtype="datetime64[D]")
+    positions = np.searchsorted(dates, targets)
+    in_range = positions < len(dates)
+    positions = positions[in_range]
+    positions = positions[dates[positions] == targets[in_range]]
+    overlap = ((ends[:, None] - 2 <= positions + PROXY_ROLLOUT_STEPS - 1)
+               & (ends[:, None] + steps >= positions - 3))
+    return ends[~overlap.any(axis=1)]
 
 
 def year_range(dates):

@@ -10,7 +10,10 @@ import torch
 
 from engine.engine import Engine
 from model.unet import CHANNELS
-from train.common import DEFAULT_VAL_YEARS, LEADS, PERIOD, day_phase, load_weather, validation_start, window_ends, year_range
+from train.common import (
+    DEFAULT_VAL_YEARS, LEADS, PERIOD, PROXY_ROLLOUT_STEPS, day_phase, load_weather,
+    validation_start, window_ends, year_range,
+)
 from train.eval_baselines import forecast_metrics, validation_cases
 
 
@@ -28,7 +31,7 @@ def evaluate_events(engine, weather, val_start, events, *, climatology_for=None)
     from monsoon_r1 import scoring
 
     labels, dates = zip(*(item.split("=", 1) for item in events))
-    indices = probe_ends(weather, dates, val_start, 14)
+    indices = probe_ends(weather, dates, val_start, PROXY_ROLLOUT_STEPS)
     if climatology_for is None:
         train_days = weather.day_of_year[:val_start]
 
@@ -40,7 +43,7 @@ def evaluate_events(engine, weather, val_start, events, *, climatology_for=None)
     details, skill_values, rain_skill_values, ratios = [], [], [], []
     for name, date, end in zip(labels, dates, indices):
         initial = weather.physical[end - 2:end + 1]
-        rollout = engine.simulate(initial, day_phase(weather.day_of_year[end]), 14)
+        rollout = engine.simulate(initial, day_phase(weather.day_of_year[end]), PROXY_ROLLOUT_STEPS)
         for lead in LEADS:
             climatology = climatology_for(end + lead)
             truth = weather.physical[end + lead]
@@ -61,7 +64,7 @@ def evaluate_events(engine, weather, val_start, events, *, climatology_for=None)
                 "peak_rain_model": float(prediction[1].max()), "peak_rain_observed": float(truth[1].max()),
                 "heavy_cells_model": int((prediction[1] > scoring.RAIN_THRESH).sum()),
                 "heavy_cells_observed": int((truth[1] > scoring.RAIN_THRESH).sum()),
-                "valid_14_day_rollout": not scoring.validity(rollout, 14),
+                "valid_14_day_rollout": not scoring.validity(rollout, PROXY_ROLLOUT_STEPS),
             })
     return {
         **scoring.forecast_points(skill_values, rain_skill_values), "events": details,
