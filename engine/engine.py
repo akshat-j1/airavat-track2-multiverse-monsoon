@@ -6,8 +6,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch.nn import functional as F
 
-from model.transport import transport_response
+from model.transport import advance_adjustment, transport_response
 from model.unet import (
     STATE_SHAPE, AnomalyUNet, advance_phase, climatology_at, decode_physical,
     encode_physical, forecast_step, static_features,
@@ -15,6 +16,10 @@ from model.unet import (
 
 CHECKPOINT_NAME = "airavat.pt"
 MAX_STEPS = 14
+ENCODED_BOUNDS = (
+    (233.15, 333.15), (0, math.log1p(400)), (-100, 100), (-100, 100),
+    (80000, 115000), (0, 150),
+)
 
 
 class Engine:
@@ -32,48 +37,61 @@ class Engine:
         self._coefficients = checkpoint["climatology"].float()
         self._scale = checkpoint["anomaly_scale"].float().view(1, 6, 1, 1)
         self._features = static_features(checkpoint["static"].float())[None]
+        self._lower, self._upper = torch.tensor(ENCODED_BOUNDS, dtype=torch.float32).T.reshape(2, 1, 6, 1, 1)
 
     @torch.inference_mode()
     def _rollout(self, windows, phases, steps, perturbed=None):
         """Run an independent forecast for each window in a CPU batch."""
-        if perturbed is not None:
-            windows = torch.cat((windows, perturbed))
-            phases = torch.cat((phases, phases))
         encoded = encode_physical(windows)
-        if perturbed is not None:
-            previous, branched = encoded[:, -1].chunk(2)
-            response = branched - previous
-            # Bound the first-day learned correction to the shock and nearby cells.
-            # Wind-driven transport still moves and diffuses the response each day.
-            initial_support = response.ne(0).any(dim=1, keepdim=True).to(response.dtype)
-            first_day_support = torch.nn.functional.max_pool2d(initial_support, 7, stride=1, padding=3)
         initial_phases = torch.stack([advance_phase(phases, day) for day in (-2, -1, 0)], dim=1)
         initial_climatology = climatology_at(self._coefficients, initial_phases)
         history = (encoded - initial_climatology) / self._scale
+        if perturbed is not None:
+            branch_encoded = encode_physical(perturbed)
+            branch_history = (branch_encoded - initial_climatology) / self._scale
+            previous = encoded[:, -1]
+            response = branch_encoded[:, -1] - previous
+            support = response.ne(0).any(dim=1, keepdim=True).to(response.dtype)
+            adjustment = response[:, 2:5]
+            tendency = torch.zeros_like(adjustment)
         future = torch.stack([advance_phase(phases, day) for day in range(1, steps + 1)], dim=1)
         climate = climatology_at(self._coefficients, future)
         forecast = []
         for day in range(steps):
-            history, encoded = forecast_step(
-                self._model, history, future[:, day], climate[:, day], self._scale, self._features,
-            )
+            phase, seasonal = future[:, day], climate[:, day]
+            history, encoded = forecast_step(self._model, history, phase, seasonal, self._scale, self._features)
+            reference = encoded.clamp(self._lower, self._upper)
+            output = reference
             if perturbed is not None:
-                reference, candidate = encoded.chunk(2)
+                branch_history, candidate = forecast_step(
+                    self._model, branch_history, phase, seasonal, self._scale, self._features,
+                )
                 wind = 0.5 * (previous[:, 2:4] + reference[:, 2:4])
                 transported = transport_response(response, wind)
-                learned_response = candidate - reference
-                if day == 0:
-                    learned_response = learned_response * first_day_support
-                branch = reference + 0.20 * learned_response + 0.80 * transported
-                branch[:, 0].clamp_(233.15, 333.15)
-                branch[:, 1].clamp_(0, math.log1p(400))
-                updated = torch.cat((reference, branch))
-                history[:, -1] = (updated - climate[:, day]) / self._scale
-                response = branch - reference
+                adjustment, tendency = advance_adjustment(adjustment, tendency)
+                # Moisture, temperature and rain retain purely advective mixing.
+                transported[:, 2:5] = 0.65 * transported[:, 2:5] + 0.35 * adjustment
+                # Advance a bounded domain of influence for both response terms.
+                support = F.max_pool2d(support, 7, stride=1, padding=3)
+                learned_weight = 0.20 if day == 0 else 0.08
+                shift = support * (learned_weight * (candidate - encoded) + (1 - learned_weight) * transported)
+                output = self._apply_response(reference, shift)
+                branch_history[:, -1] = (output - seasonal) / self._scale
+                response = output - reference
                 previous = reference
-                encoded = branch
-            forecast.append(decode_physical(encoded, lead=day + 1))
+            forecast.append(decode_physical(output, lead=day + 1))
         return torch.stack(forecast, dim=1)
+
+    def _apply_response(self, reference, shift):
+        """Compress extreme changes smoothly near a physical bound."""
+        headroom = torch.where(shift >= 0, self._upper - reference, reference - self._lower)
+        magnitude = shift.abs()
+        shoulder = 0.75 * headroom
+        tail = 0.25 * headroom
+        excess = (magnitude - shoulder).clamp_min(0)
+        soft = shoulder - tail * torch.expm1(-excess / tail.clamp_min(1e-6))
+        bounded = torch.where(magnitude <= shoulder, magnitude, soft)
+        return (reference + shift.sign() * bounded).clamp(self._lower, self._upper)
 
     def simulate(self, init_states, doy_sincos, steps, perturbation=None):
         steps = index(steps)
@@ -94,7 +112,8 @@ class Engine:
                 branch[-1] += change
                 if not np.isfinite(branch[-1]).all():
                     raise ValueError("perturbed last input contains a non-finite value")
-                perturbed = torch.from_numpy(branch)[None]
+                if not np.array_equal(branch[-1], states[-1]):
+                    perturbed = torch.from_numpy(branch)[None]
         direction = torch.from_numpy(phase / length)
         forecast = self._rollout(torch.from_numpy(states)[None], direction[None], steps, perturbed)[0].numpy()
         if not np.isfinite(forecast).all():
