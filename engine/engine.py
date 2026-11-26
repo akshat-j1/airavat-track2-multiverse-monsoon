@@ -1,4 +1,4 @@
-"""Workflow A's CPU engine for the Track 2 server."""
+"""CPU forecast engine for the Track 2 server."""
 
 import math
 from operator import index

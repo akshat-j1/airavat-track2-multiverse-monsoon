@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Multiverse of Monsoon: offline inference server (Part B).
+"""Multiverse of Monsoon offline inference server.
 
 Run:  python serve.py --port 8000
 API:  POST /health, POST /simulate  (see API_CONTRACT.md in yug-monsoon-kit)

@@ -143,8 +143,8 @@ archive and reproduce the shipped checkpoint. Keep the training archive outside 
 
 ## Build the submission brief
 
-With Contributor A's `train/brief_page1.md` present, use an authoring environment
-with ReportLab to combine it with `brief/page2.md` and its dashboard capture.
+Use ReportLab to combine `train/brief_page1.md` with `brief/page2.md` and its
+dashboard capture.
 
 ```sh
 python -m pip install reportlab
@@ -154,7 +154,6 @@ pdfinfo brief/brief.pdf
 
 The PDF should contain exactly two pages.
 
-## Ownership and integration
+## Development
 
-Work branches are `fix/ml` and `fix/app`. Shared releases use `main`. Follow
-`CLAUDE.md` for file ownership and rebase work onto shared `main` at handoff.
+Base changes on `main` and run the verification checks before merging.
